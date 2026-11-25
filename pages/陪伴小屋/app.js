@@ -5854,6 +5854,7 @@ function renderLearningPage(){
     content=`<section id="learningReviewWorkspace" class="learning-review-workspace" aria-label="学习审阅中心">${consoleLoading('正在汇总待审阅内容…')}</section>`;
   }else if(learningTab==='expression'){
     content=learningExpressionSources().length?`
+        ${renderExpressionLearning()}
         <section id="expressionSignalsWorkspace" class="expression-signals-workspace" aria-label="表达规则库">${consoleLoading('正在读取表达规则…')}</section>
         <section id="expressionSamplesWorkspace" class="expression-samples-workspace" aria-label="表达学习观察素材">${consoleLoading('正在读取观察素材…')}</section>`
       :`<div class="learning-hub-empty" role="status">暂无表达学习记录</div>`;
@@ -7528,5 +7529,4 @@ armHomeAgendaClock();
 window.addEventListener("companion:modules-ready", () => {
   try { render(); } catch (error) { console.warn("[CompanionV2] 页面模块补载后重绘失败", error); }
 }, {once: true});
-
 

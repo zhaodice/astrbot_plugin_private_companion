@@ -17,6 +17,7 @@ document, same number of model calls, same stored rows.
 
 from dataclasses import replace
 from datetime import timedelta
+import asyncio
 import json
 import unittest
 from unittest.mock import patch
@@ -230,6 +231,24 @@ class LearningInstrumentationTests(ExpressionFixture, HostFixture, unittest.Isol
         self.assertNotIn(USER_MARKER, text, "the sampled messages must never reach the log")
         self.assertNotIn(PERSONA_MARKER, text, "the prompt body must never reach the log")
         self.assertNotIn(sample_window["opened_at"], text)
+
+    async def test_manual_learning_can_start_from_the_dashboard_worker_thread(self):
+        app, context = await self.prepare()
+        manager = ExpressionStyleManagement(app)
+
+        started = await asyncio.to_thread(
+            lambda: manager.learn(operator=self.core, context=context).unwrap()
+        )
+
+        self.assertEqual(started["state"], "queued")
+        await self.until(
+            lambda: (app.expression_style.results.get(app.expression_style._work_key(context)) or {})
+            .get("state") in ("succeeded", "failed")
+        )
+        self.assertEqual(
+            app.expression_style.results[app.expression_style._work_key(context)]["state"],
+            "succeeded",
+        )
 
     async def test_a_truncated_round_logs_the_failing_step_code_and_retry(self):
         app, context = await self.prepare()

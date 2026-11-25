@@ -482,6 +482,7 @@ class ExpressionStyleService:
     _live_bindings = None
     _empty_prepare_watermarks = None
     _private_discovery_cache = None
+    _loop = None
 
     def __init__(self, runtime, *, window_hours=720):
         self.runtime = runtime
@@ -513,6 +514,69 @@ class ExpressionStyleService:
             self._state_lock = lock
         return lock
 
+    def _launch_worker(self, context, instruction):
+        """Create the learning task on the ownership loop, including from API threads.
+
+        Manual learning runs its authenticated preparation in ``asyncio.to_thread``.
+        Creating a task from that worker directly raises ``RuntimeError`` because
+        the thread has no running event loop. Automatic discovery solves this by
+        deferring launches; this helper lets both paths share one safe launcher.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            self._loop = loop
+            return loop.create_task(self.run(context, instruction),
+                                    name="companion:expression-learn")
+
+        loop = self._loop
+        if loop is None or loop.is_closed() or not loop.is_running():
+            raise TaskError("expression_worker_unavailable",
+                            "the expression learning scheduler is stopping")
+
+        ready = threading.Event()
+        launch_lock = threading.Lock()
+        launch = {"task": None, "error": None, "accepted": False, "abandoned": False}
+
+        def create():
+            with launch_lock:
+                # A timed-out API thread must not leave a coroutine scheduled to
+                # start later without a worker-table entry.
+                if launch["abandoned"]:
+                    return
+                coroutine = self.run(context, instruction)
+                try:
+                    launch["task"] = loop.create_task(
+                        coroutine, name="companion:expression-learn"
+                    )
+                except BaseException as error:  # propagate loop shutdown to the API caller
+                    coroutine.close()
+                    launch["error"] = error
+                else:
+                    launch["accepted"] = True
+                ready.set()
+
+        try:
+            loop.call_soon_threadsafe(create)
+        except RuntimeError:
+            raise TaskError("expression_worker_unavailable",
+                            "the expression learning scheduler is stopping") from None
+
+        ready.wait(5)
+        with launch_lock:
+            if not launch["accepted"] and launch["error"] is None:
+                launch["abandoned"] = True
+            accepted = launch["accepted"]
+            error = launch["error"]
+        if not accepted and error is None:
+            raise TaskError("expression_worker_unavailable",
+                            "the expression learning scheduler did not accept the task")
+        if error is not None:
+            raise error
+        return launch["task"]
+
     def _set_result(self, work_key, value):
         with self._lock():
             self.results[work_key] = value
@@ -524,6 +588,10 @@ class ExpressionStyleService:
 
     def attach(self, app):
         self.app, self.tasks, self.gateway = app, app.tasks, app.gateway
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
         if app.expression_samples is None:
             raise TaskError("expression_owner_unavailable", "the conversation owner is not attached")
         self.samples = app.expression_samples
@@ -2224,8 +2292,7 @@ class ExpressionStyleService:
         if self._pending_launch is not None:
             self._pending_launch.append((work_key, context, instruction))
         else:
-            worker = asyncio.create_task(
-                self.run(context, instruction), name="companion:expression-learn")
+            worker = self._launch_worker(context, instruction)
             with self._lock():
                 self.workers[work_key] = worker
             worker.add_done_callback(lambda done: self.app.notify())
@@ -2311,8 +2378,7 @@ class ExpressionStyleService:
             logger.info("[CompanionV2] 表达学习按手动请求清除确定性失败记录 material=%s mode=%s request=%s",
                         str(job.get("material_hash") or "")[:12], job["policy"].learning_mode, request_key[:12])
             self._clear_stop(request_key)
-        worker = asyncio.create_task(self.run(context, instruction),
-                                     name="companion:expression-learn")
+        worker = self._launch_worker(context, instruction)
         with self._lock():
             self.workers[work_key] = worker
         worker.add_done_callback(lambda done: self.app.notify())
@@ -2524,9 +2590,7 @@ class ExpressionStyleService:
                 existing = self.workers.get(work_key)
             if existing is not None and not existing.done():
                 continue
-            worker = asyncio.create_task(
-                self.run(context, instruction), name="companion:expression-learn"
-            )
+            worker = self._launch_worker(context, instruction)
             with self._lock():
                 self.workers[work_key] = worker
             worker.add_done_callback(lambda done: self.app.notify())
