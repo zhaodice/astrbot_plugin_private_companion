@@ -29,6 +29,21 @@ class CoreAdminRelayTests(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.code, DENIED_TARGET)
 
+    def test_arbitrary_target_switch_applies_only_to_the_core_admin(self):
+        private = decide(ask("9999"), actor_is_core=True, core_target_id="1001",
+                         allowed_targets=(), allow_arbitrary_targets=True)
+        group = decide(ask("8888", kind="group"), actor_is_core=True,
+                       core_target_id="1001", allowed_groups=(),
+                       allow_arbitrary_targets=True)
+        member = decide(ask("9999", source_id="5005"), actor_is_core=False,
+                        core_target_id="1001", allowed_targets=(),
+                        allow_arbitrary_targets=True)
+
+        self.assertTrue(private.allowed)
+        self.assertTrue(group.allowed)
+        self.assertFalse(member.allowed)
+        self.assertEqual(member.code, DENIED_TARGET)
+
     def test_core_admin_relay_needs_no_confirm_when_configured_off(self):
         decision = decide(ask("2002"), actor_is_core=True, core_target_id="1001",
                           allowed_targets=("2002",), require_confirm=False)

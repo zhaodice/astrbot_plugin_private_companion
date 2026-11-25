@@ -27,6 +27,12 @@ from companion_v2.conversation.reply_settings import (
     private_tool_groups_set,
 )
 from companion_v2.conversation.tool_loop import READ_ACTIONS
+from companion_v2.conversation.tool_controls import (
+    disabled_tool_set,
+    filter_host_tools,
+    filter_specs,
+    require_tool_enabled,
+)
 from companion_v2.conversation.native_tool_media import native_image_data
 from companion_v2.execution.models import TaskContext, TaskError, digest, encode, require
 from companion_v2.foundation.outcome import Outcome
@@ -41,16 +47,18 @@ logger = logging.getLogger(__name__)
 
 
 MEMORY_READ_ACTIONS = frozenset({
-    "memory.query", "memory.legacy.query", "memory.sources", "memory.operation.get", "memory.query.status",
+    "memory.query", "memory.legacy.query", "memory.sources", "memory.operation.get",
+    "memory.query.status", "memory.global.query",
 })
 GROUP_READ_ACTIONS = frozenset({"group.memory.query", "group.memory.legacy.query", "group.memory.operation"})
 
 # Stable window-level manifests.  The order is part of the cached tool prefix:
 # append new actions at the end and bump TOOL_MANIFEST_VERSION when the schema
 # changes, never splice a tool in because one message looks special.
-TOOL_MANIFEST_VERSION = "2026-11-22.1"
+TOOL_MANIFEST_VERSION = "2026-11-25.3"
 LEAN_GROUP_TOOL_ORDER = ("group.participation.choose", "group.memory.query",
-                         "group.memory.remember", "acquaintance.recall",
+                         "group.memory.remember", "memory.global.query",
+                         "acquaintance.recall",
                          "reaction.search", "slang.search")
 LEAN_GROUP_ACTIONS = frozenset(LEAN_GROUP_TOOL_ORDER)
 LEAN_PRESERVED_HOST_TOOLS = frozenset({"astr_kb_search"})
@@ -75,7 +83,7 @@ def private_tool_group(owner: str, action: str) -> str:
         return "agenda"
     if owner == "calendar":
         return "calendar"
-    if owner == "memory":
+    if owner in ("memory", "role_global"):
         return "memory"
     if owner in ("source", "growth", "relationships", "timeline", "acquaintance"):
         return "records"
@@ -328,6 +336,16 @@ class CoreReplyToolSession:
             self.private_tool_groups = private_tool_groups_set(raw_private_groups)
         except Exception:
             self.private_tool_groups = PRIVATE_TOOL_GROUPS
+        self.disabled_tools = disabled_tool_set(
+            _field(self.prepared, "mcp_disabled_tools", "[]"),
+            strict=False,
+        )
+        self.role_settings = {
+            "role_global_memory_enabled": _field(
+                self.prepared, "role_global_memory_enabled", True),
+            "group_autonomous_interests_enabled": _field(
+                self.prepared, "group_autonomous_interests_enabled", True),
+        }
         self.native_response = self.native_run_context = None
         self.native_calls = []
         from .core_reply_media import frozen_image_locators
@@ -395,9 +413,18 @@ class CoreReplyToolSession:
             group = getattr(tools, "group_memory", None)
             if group is not None:
                 offered.extend(_OfferedTool(spec, "group") for spec in group.catalog_for(context))
+            interests = getattr(tools, "group_interest_tools", None)
+            if interests is not None:
+                offered.extend(
+                    _OfferedTool(spec, "role_interest")
+                    for spec in interests.catalog_for(context, self.role_settings))
         acquaintance = getattr(tools, "acquaintance", None)
         if acquaintance is not None:
             offered.extend(_OfferedTool(spec, "acquaintance") for spec in acquaintance.catalog_for(context))
+        global_memory = getattr(tools, "role_global", None)
+        if global_memory is not None:
+            offered.extend(_OfferedTool(spec, "role_global")
+                           for spec in global_memory.catalog_for(context, self.role_settings))
         weather = getattr(tools, "weather", None)
         if weather is not None:
             offered.extend(_OfferedTool(spec, "weather") for spec in weather.catalog_for(context))
@@ -425,6 +452,7 @@ class CoreReplyToolSession:
         if (context.scope.kind in (ScopeKind.GROUP, ScopeKind.PRIVATE)
                 and getattr(getattr(getattr(self, "event", None), "platform_meta", None), "name", "") != "wechat_native"):
             offered.append(_OfferedTool(POKE_SPEC, "interaction"))
+        offered = self._filter_disabled(offered)
         if self.context.scope.kind is ScopeKind.GROUP and self.group_tool_profile in ("lean", "standard"):
             # Expose camera strictly by window/role configuration (already
             # filtered by external.catalog_for), never by current speaker, so
@@ -437,6 +465,15 @@ class CoreReplyToolSession:
             if self.private_tool_profile != "full":
                 return private_tool_manifest(offered, self.private_tool_profile, self.private_tool_groups)
         return tuple(offered)
+
+    def _filter_disabled(self, offered):
+        if not self.disabled_tools:
+            return offered
+        return list(filter_specs(
+            offered,
+            self.disabled_tools,
+            action_getter=lambda item: item.spec.action,
+        ))
 
     def _prune_disabled_private_relay(self, offered):
         """Omit relay tools in private chat when window relay is fully disabled."""
@@ -721,6 +758,11 @@ class CoreReplyToolSession:
     async def call(self, action, wrapper, arguments):
         result = None
         try:
+            require_tool_enabled(
+                self.disabled_tools,
+                action=action,
+                native_name=native_tool_name(action),
+            )
             self._latch_group_skip(wrapper, action, arguments)
             await self.authorize(wrapper)
             from companion_v2.conversation.behavior.service import ANNOTATIONS
@@ -778,6 +820,15 @@ class CoreReplyToolSession:
             elif offered.owner == "source":
                 from .core_reply_sources import execute_core_source_read
                 result = await execute_core_source_read(self, native_call_id(wrapper, action, arguments), arguments)
+            elif offered.owner == "role_global":
+                result = await self.application.tools.role_global.execute(
+                    self.context, arguments, self.role_settings)
+            elif offered.owner == "role_interest":
+                call_id = native_call_id(wrapper, action, arguments)
+                result = executor_for(self.application).local(
+                    self, call_id, action, arguments,
+                    lambda _identifier: self.application.tools.group_interest_tools.execute(
+                        self.context, arguments, self.role_settings))
             elif offered.owner == "diagnostics":
                 from .core_reply_diagnostics import execute_core_diagnostic
                 result = await execute_core_diagnostic(self, native_call_id(wrapper, action, arguments), action, arguments)
@@ -979,6 +1030,7 @@ def inject_core_reply_tools(event, req, *, application):
         inject_core_reaction_instruction(event, req, semantic, session.turn_id)
     existing = list(getattr(getattr(req, "func_tool", None), "tools", ()))
     existing = [tool for tool in existing if not isinstance(tool, CoreReplyFunctionTool)]
+    existing = filter_host_tools(existing, session.disabled_tools)
     if session.group_tool_profile == "lean" and session.context.scope.kind is ScopeKind.GROUP:
         # The lean manifest owns the group tool surface.  Host shell, file,
         # python and search schemas are large and rarely needed for banter,
@@ -1002,6 +1054,16 @@ def inject_core_reply_tools(event, req, *, application):
             req.system_prompt = (req.system_prompt.rstrip() + "\n\n" + LEAN_GROUP_INSTRUCTION).lstrip()
         if any(item.owner == "phone" for item in offered) and PHONE_TASK_INSTRUCTION not in req.system_prompt:
             req.system_prompt += "\n\n" + PHONE_TASK_INSTRUCTION
+        if any(item.owner == "role_global" for item in offered):
+            from companion_v2.memory.role_global import RoleGlobalMemoryTools
+            if RoleGlobalMemoryTools.instruction not in req.system_prompt:
+                req.system_prompt += "\n\n" + RoleGlobalMemoryTools.instruction
+        if any(item.owner == "role_interest" for item in offered):
+            from companion_v2.conversation.group_interests import (
+                GroupAutonomousInterestTools,
+            )
+            if GroupAutonomousInterestTools.instruction not in req.system_prompt:
+                req.system_prompt += "\n\n" + GroupAutonomousInterestTools.instruction
         if any(item.owner == "authoring" for item in offered):
             from companion_v2.conversation.content.authoring_workflow import INSTRUCTION as AUTHORING_INSTRUCTION
             if AUTHORING_INSTRUCTION not in req.system_prompt:

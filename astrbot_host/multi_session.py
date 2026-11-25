@@ -1114,17 +1114,47 @@ class MultiHostSession:
                         except Exception as error:
                             logger.warning("[CompanionV2] 群表情后台收录调度降级 error_type=%s",
                                            type(error).__name__)
+                    if (not reason and self.core_reply_observations is not None
+                            and settings.get("role_global_memory_enabled") is True
+                            and participation.admission.familiarity.laya_enabled(context)):
+                        remembered = replace(
+                            captured,
+                            text=(
+                                latest_native_text
+                                if isinstance(latest_native_text, str)
+                                else captured.text
+                            ),
+                        )
+                        if " ".join(remembered.text.split()):
+                            try:
+                                self.core_reply_observations.observe(
+                                    context, remembered)
+                            except Exception as error:
+                                logger.warning(
+                                    "[CompanionV2] Laya 未接话群消息记忆调度降级 "
+                                    "error_type=%s",
+                                    type(error).__name__)
                     from companion_v2.conversation.reply_settings import group_wakeup_settings
                     wakeup = group_wakeup_settings(settings)
                     return Outcome.success({"admitted": bool(reason), "reason": reason,
                         "continuation": continuation,
+                        "familiarity": participation.admission.familiarity_evidence(
+                            context, captured.event_id),
                         "trigger_facts": facts,
                         "mentioned": facts["mentioned"], "context_key": context.key, "event_id": captured.event_id,
                         "participation_policy": {
                             "question_enabled": wakeup["group_wakeup_enabled"] and wakeup["group_wakeup_question_enabled"],
                             "question_threshold": wakeup["group_wakeup_question_threshold"],
-                            "interjection_enabled": wakeup["group_wakeup_enabled"] and values["enable_group_interjection"],
+                            # Familiarity is a separate opt-in candidate source.
+                            # Once that source admits the message, Laya must be
+                            # able to choose a natural interjection even when the
+                            # older keyword/interjection candidate switch is off.
+                            "interjection_enabled": (
+                                (wakeup["group_wakeup_enabled"] and values["enable_group_interjection"])
+                                or reason in ("familiar_contact", "familiar_group")
+                            ),
                             "interest_probability": wakeup["group_wakeup_interest_probability"],
+                            "familiarity_enabled": wakeup["group_familiarity_enabled"],
                             "cooldown_seconds": wakeup["group_wakeup_cooldown_seconds"],
                             **({"mention_force_reply_enabled": True}
                                if values["mention_force_reply_enabled"] else {}),
@@ -1283,6 +1313,9 @@ class MultiHostSession:
                 group_tool_profile = "full"
                 private_tool_profile = "full"
                 private_tool_groups = None
+                mcp_disabled_tools = ()
+                role_global_memory_enabled = True
+                group_autonomous_interests_enabled = True
                 captured_voice_policy, voice_settings_available = None, False
                 captured_outbound_settings = None
                 astrbot_animated_image_understanding_enabled = False
@@ -1296,6 +1329,7 @@ class MultiHostSession:
                             voice_policy as parse_voice_policy,
                         )
                         from companion_v2.conversation.text_processing import OUTPUT_TEXT_FIELDS
+                        from companion_v2.conversation.tool_controls import disabled_tool_set
                         from dataclasses import fields
                         snapshot = self.application.reply_settings.snapshot(context.actor, context, self.now())
                         presentation_settings = {name: snapshot.values[GROUP + "." + name]
@@ -1306,6 +1340,14 @@ class MultiHostSession:
                             GROUP + ".private_tool_profile", PRIVATE_TOOL_DEFAULTS["private_tool_profile"])
                         private_tool_profile = (raw_private_profile if raw_private_profile in PRIVATE_TOOL_PROFILES
                                                 else "full")
+                        mcp_disabled_tools = disabled_tool_set(
+                            snapshot.values.get(GROUP + ".mcp_disabled_tools", "[]"),
+                            strict=False,
+                        )
+                        role_global_memory_enabled = snapshot.values.get(
+                            GROUP + ".role_global_memory_enabled", True) is True
+                        group_autonomous_interests_enabled = snapshot.values.get(
+                            GROUP + ".group_autonomous_interests_enabled", True) is True
                         raw_private_groups = snapshot.values.get(
                             GROUP + ".private_tool_groups", PRIVATE_TOOL_DEFAULTS["private_tool_groups"])
                         try:
@@ -1524,6 +1566,9 @@ class MultiHostSession:
                     "presentation_settings": presentation_settings,
                     "group_tool_profile": group_tool_profile,
                     "private_tool_profile": private_tool_profile,
+                    "mcp_disabled_tools": mcp_disabled_tools,
+                    "role_global_memory_enabled": role_global_memory_enabled,
+                    "group_autonomous_interests_enabled": group_autonomous_interests_enabled,
                     **({"private_tool_groups": private_tool_groups} if private_tool_groups is not None else {}),
                     "outbound_settings": captured_outbound_settings,
                     "astrbot_animated_image_understanding_enabled": astrbot_animated_image_understanding_enabled,
@@ -1685,6 +1730,12 @@ class MultiHostSession:
                 # identity proof.
                 self.application.messages.group_network.record_names(
                     context, nickname=nickname, card=card, at=self.now())
+                participation = getattr(getattr(self.application, "tools", None),
+                                        "group_participation", None)
+                record_familiarity_names = getattr(participation, "record_platform_names", None)
+                if callable(record_familiarity_names):
+                    record_familiarity_names(
+                        context, nickname=nickname, card=card, at=self.now())
         except Exception:
             pass
 

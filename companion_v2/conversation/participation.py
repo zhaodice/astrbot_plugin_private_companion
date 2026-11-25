@@ -215,6 +215,7 @@ class GroupParticipation:
         self.records = GroupPresenceStore(self.runtime)
         self.speech = GroupSpeechLedger(self.runtime)
         self.admission = GroupReplyAdmission(messages)
+        self.interests = self.admission.interests
         from .behavior import GroupBehavior
         self.behavior = GroupBehavior(messages)
         self._frozen_turns = {}
@@ -324,7 +325,9 @@ class GroupParticipation:
         texts = [clean_group_text(material.payload) for material in request.context.materials
                  if material.purpose == "current_source" or material.purpose.startswith("merged_input:")]
         current = " ".join(texts)
-        hints = group_hints(request, context, settings, recent, batches, current_text=current)
+        hints = group_hints(
+            request, context, settings, recent, batches, current_text=current,
+            role_interests=self.interests.prompt_items(context, settings))
         values = group_participation_settings(self.runtime, context)
         interjection = self._interjection_policy(values, settings)
         repeat_policy = self._repeat_policy(values)
@@ -376,6 +379,14 @@ class GroupParticipation:
         if reset is not None and stamp(received_at) <= reset["reset_at"]:
             return False
         self.admission.observe(context, text=text, speaker_id=speaker_id, received_at=received_at, event_id=event_id)
+        try:
+            self.admission.familiarity.observe(
+                context, text=text, speaker_id=speaker_id, received_at=received_at,
+                event_id=event_id)
+        except Exception:
+            # Familiarity counters are optional Laya evidence. They never
+            # change whether the authenticated group message itself is handled.
+            pass
         if not text:
             return False  # media-only messages break the burst, without becoming expression evidence
         try:
@@ -400,6 +411,15 @@ class GroupParticipation:
             # Observation is an additive reference. A malformed optional setting
             # or a transient metadata write must never reject the authenticated
             # group route or change the reply decision.
+            return False
+
+    def record_platform_names(self, context, *, nickname=None, card=None, at=None):
+        """Attach authenticated platform names to familiarity evidence when active."""
+
+        try:
+            return self.admission.familiarity.record_names(
+                context, nickname=nickname, card=card, at=at)
+        except Exception:
             return False
 
     @staticmethod

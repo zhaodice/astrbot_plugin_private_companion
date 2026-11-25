@@ -38,6 +38,13 @@ const DEFAULTS = {
   group_wakeup_image_enabled: false, group_wakeup_image_weight: 0.2,
   group_wakeup_image_default_guidance_enabled: true,
   group_wakeup_short_text_wait_ms: 15000, group_wakeup_log_limit: 80,
+  group_familiarity_enabled: true, group_familiarity_speaker_enabled: true,
+  group_familiarity_mention_enabled: true, group_familiarity_group_enabled: true,
+  group_familiarity_min_messages: 6, group_familiarity_min_active_days: 2,
+  group_familiarity_group_min_messages: 20, group_familiarity_group_min_members: 3,
+  group_familiarity_probability: 0.35, group_familiarity_cooldown_seconds: 180,
+  role_global_memory_enabled: true, group_autonomous_interests_enabled: true,
+  mcp_disabled_tools: '[]',
   group_air_guard_enabled: true, group_high_intensity_enabled: false,
   group_air_guard_window_seconds: 60,
   recall_silence_enabled: true,
@@ -99,6 +106,9 @@ const LIMITS = {
   group_wakeup_fatigue_decay_minutes: [5, 720], group_wakeup_generated_keyword_limit: [4, 80],
   group_wakeup_topic_interest_max_boost: [0, 150], group_wakeup_debounce_pending_penalty: [0, 100],
   group_wakeup_short_text_wait_ms: [0, 30000], group_wakeup_log_limit: [10, 300],
+  group_familiarity_min_messages: [2, 100], group_familiarity_min_active_days: [1, 30],
+  group_familiarity_group_min_messages: [4, 500], group_familiarity_group_min_members: [2, 50],
+  group_familiarity_cooldown_seconds: [0, 86400],
   group_air_guard_window_seconds: [30, 1800], group_air_guard_max_bot_replies: [1, 20],
   group_air_guard_cooldown_seconds: [0, 1800],
   group_conversation_followup_seconds: [15, 1800], group_conversation_followup_max_turns: [1, 12],
@@ -118,7 +128,8 @@ const GROUP_SCOPE_FIELDS = new Set(['group_wakeup_primary_member_ids', 'group_wa
 const FIELDS = Object.fromEntries(Object.entries(DEFAULTS).map(([name, value]) => {
   const kind = name === 'part_gap_log_base' ? 'weight'
     : ['voice_probability', 'voice_primary_mention_probability',
-       'group_wakeup_interest_probability', 'group_wakeup_image_weight'].includes(name)
+       'group_wakeup_interest_probability', 'group_wakeup_image_weight',
+       'group_familiarity_probability'].includes(name)
     ? 'probability'
     : typeof value === 'boolean' ? 'boolean' : typeof value === 'string' ? 'text' : 'integer';
   const roleShared = new Set([
@@ -130,6 +141,9 @@ const FIELDS = Object.fromEntries(Object.entries(DEFAULTS).map(([name, value]) =
     'private_closing_guard_prompt_enabled', 'recall_silence_enabled',
     'private_debounce_enabled', 'private_debounce_min_ms', 'private_debounce_max_ms',
     'private_debounce_total_ms',
+    'role_global_memory_enabled', 'group_autonomous_interests_enabled',
+    'mcp_disabled_tools',
+    ...Object.keys(DEFAULTS).filter(name => name.startsWith('group_familiarity_')),
     ...Object.keys(DEFAULTS).filter(name => name.startsWith('group_wakeup_') && !GROUP_SCOPE_FIELDS.has(name)),
   ]);
   const entry = {kind, default: value, apply_mode: 'immediate',
@@ -153,6 +167,20 @@ function status(changes = {}, token = TOKEN) {
     provenance: Object.fromEntries(Object.keys(settings).map(name =>
       [name, {layer: 'window', explicit: true, revision: 1}])),
     fields: FIELDS, recent: [], participation_recent: [], participation_limit: 80,
+    tools: [
+      {id: 'memory.global.query', native_name: 'companion_v2_memory_global_query',
+        display_name: '全局记忆检索', group: 'companion',
+        description: '检索 Bot 角色自己的跨群和跨私聊记忆。', enabled: true},
+      {id: 'relay_send', native_name: 'companion_v2_relay_send',
+        display_name: '发送跨会话消息', group: 'relay',
+        description: '把准备中的消息发往指定群聊或好友。', enabled: true},
+      {id: 'web_search', native_name: 'web_search',
+        display_name: 'AstrBot 工具 · web_search', group: 'native',
+        description: '搜索公开网页。', enabled: true},
+      {id: 'mcp_docs_search', native_name: 'mcp_docs_search',
+        display_name: 'MCP docs · mcp_docs_search', group: 'mcp',
+        description: '调用 MCP 文档检索。', enabled: true},
+    ],
     tts: {state: 'ready', providers: [{id: 'tts-a', model: 's2.1-pro-free', voice: '示例音色甲'}, {id: 'tts-b'}]},
   };
 }
@@ -175,9 +203,10 @@ function harness() {
       setAttribute(name, value) { attributes[name] = value; }};
   });
   const sectionIds = ['segment', 'style', 'cleanup', 'wakeup_direct', 'wakeup_interest', 'wakeup_members',
+    'wakeup_familiarity',
     'wakeup_cold_group', 'wakeup_fatigue', 'group_continuation', 'private_debounce',
     'silence_policy', 'group_air_guard',
-    'private_closing', 'group_content_safety',
+    'private_closing', 'group_content_safety', 'memory_tools',
     'context_image', 'image_narration', 'video_narration', 'file_understanding', 'forwards', 'voice',
     'voice_channels', 'components', 'checks'];
   const sectionTabs = sectionIds.map(id => {
@@ -349,6 +378,107 @@ test('group wakeup controls keep the selected group override', async () => {
     /data-rail="group_wakeup_enabled"[\s\S]*data-layer="window"/);
 });
 
+test('decision response exposes familiarity candidates only as Laya invitations to consider', async () => {
+  const harnessed = await loaded(harness(), 'decision');
+  assert.equal(harnessed.page.selectSection('wakeup_familiarity'), true);
+  assert.match(harnessed.root.innerHTML, /熟人提及和熟群消息才可成为候选/);
+  assert.match(harnessed.root.innerHTML, /不要求逐句回应/);
+  assert.match(harnessed.slots.settings.innerHTML, /熟人、熟群候选/);
+  assert.match(harnessed.slots.settings.innerHTML, /不保存群消息正文/);
+  assert.match(harnessed.slots.settings.innerHTML, /候选不是必答/);
+  assert.match(harnessed.slots.settings.innerHTML, /主要成员直接视为熟人/);
+  const instance = live(harnessed);
+  for (const name of ['group_familiarity_enabled', 'group_familiarity_speaker_enabled',
+    'group_familiarity_mention_enabled', 'group_familiarity_group_enabled',
+    'group_familiarity_min_messages', 'group_familiarity_min_active_days',
+    'group_familiarity_group_min_messages', 'group_familiarity_group_min_members',
+    'group_familiarity_probability', 'group_familiarity_cooldown_seconds']) {
+    assert.ok(instance.state.container.fields[name], `${name} is available in the decision editor`);
+    assert.deepEqual(plain(instance.state.container.fields[name].editable), ['role', 'window']);
+  }
+  assert.equal(instance.state.container.fields.group_familiarity_min_messages.minimum, 2);
+  assert.equal(instance.state.container.fields.group_familiarity_min_active_days.maximum, 30);
+  assert.equal(instance.state.container.fields.group_familiarity_probability.minimum, 0);
+  assert.equal(instance.state.container.fields.group_familiarity_probability.maximum, 1);
+  instance.state.draft.group_familiarity_probability = 0;
+  const saving = instance.save(false);
+  await drains();
+  assert.deepEqual(plain(harnessed.requests[1].body.changes), {group_familiarity_probability: 0});
+  harnessed.requests[1].resolve({result: {operation_id: 'familiarity-save', replayed: false},
+    status: status({group_familiarity_probability: 0}, 'c'.repeat(64))});
+  await saving;
+  harnessed.page.unmount();
+});
+
+test('bot role global memory and per-tool controls are rendered on the decision page', async () => {
+  const harnessed = await loaded(harness(), 'decision');
+  assert.equal(harnessed.page.selectSection('memory_tools'), true);
+  const instance = live(harnessed);
+  for (const name of ['role_global_memory_enabled', 'group_autonomous_interests_enabled',
+    'mcp_disabled_tools']) {
+    assert.ok(instance.state.container.fields[name], `${name} is available in the decision editor`);
+    assert.deepEqual(plain(instance.state.container.fields[name].editable), ['role', 'window']);
+  }
+  assert.equal(instance.state.container.fields.mcp_disabled_tools.input, 'tool-checklist');
+  assert.equal(typeof instance.state.container.fields.mcp_disabled_tools.catalog, 'function');
+  assert.equal(instance.state.status.tools.length, 4);
+  const html = harnessed.slots.settings.innerHTML;
+  assert.match(html, /data-wb-group="memory_tools"/);
+  assert.match(html, /Companion \/ Relay/);
+  assert.match(html, /AstrBot 原生 \/ MCP/);
+  assert.match(html, /memory\.global\.query/);
+  assert.match(html, /全局记忆检索/);
+  assert.match(html, /检索 Bot 角色自己的跨群和跨私聊记忆/);
+  assert.match(html, /取消勾选即禁用/);
+  assert.match(html, /陌生人第一次私聊也会进入同一个角色记忆池/);
+});
+
+test('tool checklist stores a deny-list while preserving unavailable legacy entries', async () => {
+  const harnessed = harness();
+  harnessed.page.mount(harnessed.root, {view: 'decision'});
+  await drains();
+  harnessed.requests[0].resolve(status({mcp_disabled_tools: '["legacy.missing"]'}));
+  await drains();
+  const instance = live(harnessed);
+  const toolInputs = [
+    {checked: true, dataset: {wbToolId: 'memory.global.query'}},
+    {checked: true, dataset: {wbToolId: 'relay_send'}},
+    {checked: true, dataset: {wbToolId: 'web_search'}},
+    {checked: true, dataset: {wbToolId: 'mcp_docs_search'}},
+  ];
+  const control = {
+    querySelectorAll: selector => selector === '[data-wb-tool-id]:checked'
+      ? toolInputs.filter(input => input.checked) : toolInputs,
+    querySelector: selector => selector === '.wb-source-count'
+      ? {textContent: ''} : null,
+  };
+  const row = {classList: {toggle() {}}};
+  const checkbox = {
+    type: 'checkbox', checked: false,
+    dataset: {wbField: 'mcp_disabled_tools', wbToolId: 'memory.global.query'},
+    closest: selector => selector === '.wb-tool-picker' ? control
+      : selector === '.wb-field' ? row : null,
+  };
+  toolInputs[0].checked = false;
+  harnessed.listeners['settings:change']({type: 'change', target: checkbox});
+  const disabled = plain(JSON.parse(instance.state.draft.mcp_disabled_tools));
+  assert.deepEqual(disabled, ['legacy.missing', 'memory.global.query']);
+  assert.equal(harnessed.workbench.resolveToolChecklist(
+    '["legacy.missing"]', plain(status().tools),
+    ['relay_send', 'web_search', 'mcp_docs_search']),
+  '["legacy.missing","memory.global.query"]');
+
+  const saving = instance.save(false);
+  await drains();
+  assert.deepEqual(plain(harnessed.requests[1].body.changes), {
+    mcp_disabled_tools: '["legacy.missing","memory.global.query"]',
+  });
+  harnessed.requests[1].resolve({result: {operation_id: 'tools-save', replayed: false},
+    status: status({mcp_disabled_tools: '["legacy.missing","memory.global.query"]'}, 'c'.repeat(64))});
+  await saving;
+  harnessed.page.unmount();
+});
+
 test('a window override can be cleared through the role inheritance control', async () => {
   const inherited = status({style_prompt: '角色默认表达'});
   inherited.provenance.style_prompt = {layer: 'role', explicit: false, revision: 1};
@@ -382,7 +512,7 @@ test('the card is split into labelled groups but keeps one save', async () => {
     'voice_limits', 'voice_primary', 'voice_extra', 'voice_channels', 'components', 'checks']);
   assert.ok(plain(instance.state.container.groups.find(group => group.id === 'voice_engine').fields)
     .includes('voice_provider_id'));
-  assert.ok(!ids.some(id => ['wakeup_direct', 'wakeup_interest', 'wakeup_members', 'wakeup_cold_group',
+  assert.ok(!ids.some(id => ['wakeup_direct', 'wakeup_interest', 'wakeup_members', 'wakeup_familiarity', 'wakeup_cold_group',
     'wakeup_fatigue', 'silence_policy', 'group_air_guard', 'group_content_safety'].includes(id)));
   assert.deepEqual(Object.keys(plain(instance.state.container.fields.rule_mode.choices)),
     ['words', 'regex', 'sentences', 'paragraphs']);
@@ -789,8 +919,12 @@ test('reply expression, perception, and decision settings partition every field 
   assert.deepEqual(plain(decisionState.fields.private_tool_groups.chipOptions.options),
     ['agenda', 'calendar', 'memory', 'records', 'interaction', 'media', 'diagnostics', 'relay', 'extensions']);
   assert.deepEqual(plain(decisionState.groups.map(group => group.id)),
-    ['wakeup_direct', 'wakeup_interest', 'wakeup_members', 'wakeup_cold_group', 'wakeup_fatigue',
-      'group_continuation', 'private_debounce', 'silence_policy', 'group_air_guard', 'private_closing', 'group_content_safety']);
+    ['wakeup_direct', 'wakeup_interest', 'wakeup_members', 'wakeup_familiarity', 'wakeup_cold_group', 'wakeup_fatigue',
+      'group_continuation', 'private_debounce', 'silence_policy', 'group_air_guard', 'private_closing',
+      'group_content_safety', 'memory_tools']);
+  assert.ok(decision.includes('role_global_memory_enabled'));
+  assert.ok(decision.includes('group_autonomous_interests_enabled'));
+  assert.ok(decision.includes('mcp_disabled_tools'));
   const perceptionHarness = await loaded(harness(), 'perception');
   const perceptionState = live(perceptionHarness).state.container;
   const perception = plain(perceptionState.groups.flatMap(group => group.fields));
@@ -1458,4 +1592,3 @@ test('switching between text, voice and platform dynamically toggles navigationL
   assert.match(direct.slots.settings.innerHTML, /class="wb-section-layout"/);
   direct.page.unmount();
 });
-

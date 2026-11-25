@@ -17,6 +17,7 @@ DEFAULTS = {
     # 核心管理员向外递话默认开启，但仍只发白名单目标，且默认先确认。
     "enabled": True,
     "require_confirm": True,
+    "allow_arbitrary_targets": False,
     "max_text_chars": 500,
     "allowed_targets": "",
     "allowed_groups": "",
@@ -43,7 +44,8 @@ def target_for(context):
 def validate(values):
     if type(values) is not dict or set(values) != set(DEFAULTS):
         raise ConfigurationError("relay_configuration_invalid", "provide the declared relay settings")
-    for name in ("enabled", "require_confirm", "prefer_relationship_names", "member_relay_enabled"):
+    for name in ("enabled", "require_confirm", "allow_arbitrary_targets",
+                 "prefer_relationship_names", "member_relay_enabled"):
         if type(values[name]) is not bool:
             raise ConfigurationError("relay_configuration_invalid", f"{name} must be boolean")
     for name in ("allowed_targets", "allowed_groups", "core_target_id", "member_relay_allowed_senders"):

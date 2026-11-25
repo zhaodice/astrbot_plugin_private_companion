@@ -8,6 +8,8 @@ from .group_observation import parse_moment
 from .group_timing import clean_group_text, repeat_burst, repeat_signature
 from .group_questions import question_signal
 from .group_followup import FOLLOW_UP_REASONS, progress as followup_progress
+from .group_familiarity import GroupFamiliarity
+from .group_interests import GroupAutonomousInterests
 from .reply_settings import group_continuation_settings, group_wakeup_settings
 from .reset import batch_current, boundary
 
@@ -15,6 +17,7 @@ from .reset import batch_current, boundary
 FOLLOW_UP_SECONDS = 120
 MAX_GROUPS = 128
 MAX_OBSERVATIONS = 128
+MAX_FAMILIARITY_EVIDENCE = 256
 PREFIX = "conversation.group_admission.v1:"
 CORE_PREFIX = "conversation.group_core_reply.v1:"
 REASONS = {"mention": "明确 @ 机器人", "native_wakeup": "命中宿主唤醒词",
@@ -25,7 +28,10 @@ REASONS = {"mention": "明确 @ 机器人", "native_wakeup": "命中宿主唤醒
            "context_word": "命中配置的群聊相关词", "interest": "命中配置的兴趣词",
            "repeat": "本群复读达到配置阈值", "interjection": "命中已开启的自主插话线索",
            "cold_group": "命中配置的冷群接话策略", "role_choice": "原人格自主判断参与",
-           "behavior": "与本角色学到的群聊互动习惯相关"}
+           "behavior": "与本角色学到的群聊互动习惯相关",
+           "familiar_contact": "观察到的熟人正在发言或被提及",
+           "familiar_group": "本群已有足够的长期活跃观察",
+           "role_interest": "命中角色自主形成的兴趣"}
 # Images may wake a group on their own only from the midpoint upward. Below it
 # the same setting means "images are extra context for a turn that already has a
 # textual reason", so 0.2 cannot behave exactly like 1.0.
@@ -50,13 +56,18 @@ def image_wakeup_candidate(wakeup, *, has_image, text):
 class GroupReplyAdmission:
     def __init__(self, messages):
         self.messages, self.runtime = messages, messages.runtime
+        self.familiarity = GroupFamiliarity(messages)
+        self.interests = GroupAutonomousInterests(messages)
         self.observations = {}
         self._live_core_events = {}
+        self._familiarity_evidence = {}
 
     def _key(self, context):
         scope = context.scope
+        role = context.role_binding.role
         return (scope.installation_id, scope.platform, scope.bot_id, scope.account_id, scope.native_scope_id,
-                scope.session_id, context.role_binding.role, getattr(context.role_binding, "revision", 0))
+                scope.session_id, getattr(role, "subject_id", role),
+                getattr(context.role_binding, "revision", 0))
 
     def reset_window(self, window):
         route = (window.installation_id, window.platform, window.bot_id, window.account_id,
@@ -67,6 +78,9 @@ class GroupReplyAdmission:
         for key in tuple(self._live_core_events):
             if key[:6] == route:
                 del self._live_core_events[key]
+        for key in tuple(self._familiarity_evidence):
+            if key[0][:6] == route:
+                del self._familiarity_evidence[key]
 
     def note_live_core_turn(self, context, event_id, *, active):
         if not isinstance(event_id, str) or not event_id:
@@ -146,12 +160,18 @@ class GroupReplyAdmission:
             context, instruction, at, settings=settings, event_id=event_id)
         if continuation["limit_reached"]:
             return ""
+        inspection = self._inspect_familiarity(
+            context, text=compact, at=at, settings=settings, event_id=event_id)
         if mentions_others:
-            return "behavior" if self._behavior_candidate(context, compact, wakeup, participation) else ""
+            familiar = self._familiarity_candidate(
+                context, text=compact, at=at, settings=settings, event_id=event_id, inspection=inspection)
+            return familiar or ("behavior" if self._behavior_candidate(
+                context, compact, wakeup, participation) else "")
         if continuation["candidate_reason"]:
             return continuation["candidate_reason"]
         if not wakeup["group_wakeup_enabled"]:
-            return ""
+            return self._familiarity_candidate(
+                context, text=compact, at=at, settings=settings, event_id=event_id, inspection=inspection)
         if image_wakeup_candidate(wakeup, has_image=has_image, text=text):
             return "image_interest"
         if not compact or not any(char.isalnum() for char in compact):
@@ -174,6 +194,10 @@ class GroupReplyAdmission:
                      else burst["count"]) if burst else 0
             if count >= participation["group_repeat_trigger_threshold"]:
                 return "repeat"
+        familiar = self._familiarity_candidate(
+            context, text=compact, at=at, settings=settings, event_id=event_id, inspection=inspection)
+        if familiar:
+            return familiar
         if self._behavior_candidate(context, compact, wakeup, participation):
             return "behavior"
         # A repeated question or interest keyword is still a literal repeat.
@@ -191,6 +215,13 @@ class GroupReplyAdmission:
                 and self._sample(context, "interest", wakeup["group_wakeup_interest_probability"],
                                  event_id, at, compact)):
             return "interest"
+        autonomous = self.interests.match(context, compact, settings=settings)
+        if autonomous is not None and self._sample(
+                context, "role_interest",
+                min(1.0, wakeup["group_wakeup_interest_probability"]
+                    * float(autonomous.get("weight", 1.0))),
+                event_id, at, compact):
+            return "role_interest"
         if participation["enable_group_interjection"]:
             from .group_interjection import openings
             signals = openings(compact)
@@ -204,6 +235,40 @@ class GroupReplyAdmission:
             if previous and (at - max(previous)).total_seconds() >= wakeup["group_wakeup_cold_group_idle_minutes"] * 60:
                 return "cold_group"
         return ""
+
+    def _inspect_familiarity(self, context, *, text, at, settings, event_id):
+        try:
+            evidence = self.familiarity.inspect(
+                context, text=text, at=at, settings=settings)
+        except Exception:
+            return None
+        if event_id is not None and isinstance(evidence, dict):
+            self._remember_familiarity(context, event_id, evidence)
+        return evidence if isinstance(evidence, dict) else None
+
+    def _familiarity_candidate(self, context, *, text, at, settings, event_id, inspection=None):
+        try:
+            evidence = self.familiarity.candidate(
+                context, text=text, at=at, settings=settings, event_id=event_id,
+                inspection=inspection)
+        except Exception:
+            return ""
+        if event_id is not None:
+            self._remember_familiarity(context, event_id, evidence)
+        return evidence.get("candidate_reason", "")
+
+    def _remember_familiarity(self, context, event_id, evidence):
+        key = (self._key(context), event_id)
+        self._familiarity_evidence.pop(key, None)
+        if len(self._familiarity_evidence) >= MAX_FAMILIARITY_EVIDENCE:
+            self._familiarity_evidence.pop(next(iter(self._familiarity_evidence)))
+        self._familiarity_evidence[key] = evidence
+
+    def familiarity_evidence(self, context, event_id):
+        if event_id is None:
+            return None
+        evidence = self._familiarity_evidence.get((self._key(context), event_id))
+        return dict(evidence) if isinstance(evidence, dict) else None
 
     def _behavior_candidate(self, context, text, wakeup, participation):
         if not wakeup["group_wakeup_enabled"] or not participation.get("enable_group_behavior_imitation", False):

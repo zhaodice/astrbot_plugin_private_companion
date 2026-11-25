@@ -3,16 +3,35 @@
 import asyncio
 from datetime import timedelta
 import json
+from types import SimpleNamespace as NS
 import unittest
+from unittest.mock import patch
 
 from companion_v2.conversation.native_observations import ASSISTANT_OWNER, INPUT_OWNER
 from companion_v2.conversation.native_history import dialogue
 from companion_v2.conversation.recalls import MessageRecall
-from companion_v2.execution.models import require, stamp
-from companion_v2.foundation.refs import RoleOwnerRef
+from companion_v2.conversation.reply_settings import (
+    ReplyConfigurationOwner,
+    configuration_fields,
+    target_for,
+)
+from companion_v2.execution.models import TaskContext, require, stamp
+from companion_v2.foundation.refs import (
+    AudienceRef,
+    RoleOwnerRef,
+    ScopeRef,
+    SubjectKind,
+    SubjectRef,
+)
+from companion_v2.identity_policy.models import (
+    AuthenticatedHostPrincipal,
+    ResolvedIdentity,
+    RoleBinding,
+)
 from companion_v2.memory.episodes import recent_dialogue_lines
 from companion_v2.memory.models import Proposal
 from companion_v2.role_work.journal.models import JournalContext, JournalKey, JournalKind
+from tests.group_host_support import GroupFixture, group_config
 from tests.multi_host_support import MultiFixture
 
 
@@ -76,6 +95,70 @@ class CoreReplyObservationTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replies[0]["excerpt"], "我读完了")
         self.assertEqual(replies[0]["delivery_state"], "send_returned")
         self.assertEqual(self.app.runtime.read_all("SELECT part_id FROM conversation_delivery_receipts", ()), ())
+
+    async def test_real_private_observation_is_role_global_and_private_text_is_withheld(self):
+        prepared = await self.prepared(
+            identifier="stranger-global-memory",
+            text="我第一次来私聊，想聊聊海边旧灯塔",
+        )
+        await prepared["native_source_future"]
+        original = prepared["context"]
+        other_scope = ScopeRef(
+            original.scope.installation_id,
+            original.scope.platform,
+            original.scope.kind,
+            "another-stranger-window",
+            original.scope.bot_id,
+            original.scope.account_id,
+            "another-conversation",
+            "another-session",
+        )
+        principal = AuthenticatedHostPrincipal(
+            other_scope.installation_id,
+            "host",
+            other_scope.platform,
+            "another-stranger",
+            other_scope.bot_id,
+            other_scope.account_id,
+        )
+        subject = SubjectRef(
+            other_scope.installation_id,
+            SubjectKind.HUMAN,
+            "subject-another-stranger",
+        )
+        actor = ResolvedIdentity(
+            principal,
+            subject,
+            "another-stranger-binding",
+            1,
+            1,
+        )
+        another = TaskContext(
+            actor,
+            RoleBinding(other_scope, original.role_binding.role, 1),
+            AudienceRef(other_scope, (subject,)),
+        )
+
+        result = await self.app.messages.tools.role_global.memory.query(
+            another,
+            query="海边旧灯塔",
+            limit=8,
+        )
+
+        self.assertEqual(result["state"], "ok", result)
+        self.assertEqual(len(result["items"]), 1)
+        item = result["items"][0]
+        self.assertEqual(
+            item["scope"]["native_scope_id"],
+            original.scope.native_scope_id,
+        )
+        self.assertEqual(
+            item["projection"]["visibility"],
+            "other_private_withheld",
+        )
+        self.assertEqual(item["text"], "")
+        self.assertEqual(result["coverage"]["withheld_private"], 1)
+        self.assertNotIn("旧灯塔", json.dumps(result, ensure_ascii=False))
 
     async def test_intervention_dialogue_contains_only_real_role_replies(self):
         prepared = await self.prepared(identifier="native-intervention-dialogue", text="你早点休息吧")
@@ -180,6 +263,85 @@ class CoreReplyObservationTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         await observer.close()
         self.assertTrue(working["native_source_future"].done())
         self.assertEqual((await working["native_source_future"]).owner, INPUT_OWNER)
+
+
+class GroupRoleGlobalMemoryObservationTests(
+        GroupFixture, unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.controller = self.make_controller(
+            group_config(group_delivery_mode="onebot_group"))
+        self.app = await self.start_host()
+        self.app.attach_laya_decision(lambda context: NS(
+            store=NS(raw=lambda: {
+                "enabled": True,
+                "decision_fields": {"action": True},
+            })
+        ))
+
+    def configure_reply(self, context, **changes):
+        common = self.controller.settings.common
+        fields = configuration_fields(
+            common.segmentation,
+            common.streaming,
+            common.policy.part_gap_seconds,
+        )
+        owner, target = ReplyConfigurationOwner(self.app.runtime), target_for(context)
+        owner.write(
+            target,
+            fields,
+            changes={
+                "conversation.presentation." + key: value
+                for key, value in changes.items()
+            },
+            reset=(),
+            expected_revision=owner.read(target, fields).revision,
+            observed_at=self.clock.now(),
+        )
+
+    async def flush(self):
+        observer = self.controller.session.core_reply_observations
+        while observer._pending:
+            await asyncio.gather(*tuple(observer._pending), return_exceptions=False)
+
+    async def test_laya_open_collects_unadmitted_group_messages_for_global_memory(self):
+        first = self.group_event(
+            identifier="global-memory-unadmitted",
+            text="昨晚路过码头，看见一只深海蓝邮筒",
+        )
+        context = (await self.controller.observe_group_early(first)).unwrap()
+        candidate = (await self.controller.group_reply_candidate(first)).unwrap()
+        self.assertFalse(candidate["admitted"])
+        self.assertEqual(candidate["reason"], "")
+        await self.flush()
+
+        recalled = await self.app.tools.role_global.memory.query(
+            context, query="深海蓝邮筒", limit=8)
+        self.assertEqual(recalled["state"], "ok", recalled)
+        self.assertIn("深海蓝邮筒", json.dumps(recalled, ensure_ascii=False))
+        self.assertTrue(any(
+            item["projection"]["visibility"] == "group_public"
+            for item in recalled["items"]
+        ))
+
+        setting = self.group_event(
+            identifier="global-memory-setting",
+            text="这条只用于写配置",
+        )
+        setting_context = (
+            await self.controller.observe_group_early(setting)
+        ).unwrap()
+        self.configure_reply(setting_context, role_global_memory_enabled=False)
+        disabled = self.group_event(
+            identifier="global-memory-disabled",
+            text="关闭后这句不应进入角色记忆",
+        )
+        await self.controller.observe_group_early(disabled)
+        observer = self.controller.session.core_reply_observations
+        with patch.object(observer, "observe", wraps=observer.observe) as observe:
+            candidate = (await self.controller.group_reply_candidate(disabled)).unwrap()
+            self.assertFalse(candidate["admitted"])
+            await self.flush()
+        observe.assert_not_called()
 
 
 if __name__ == "__main__":

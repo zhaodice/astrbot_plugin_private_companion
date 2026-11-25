@@ -2,12 +2,14 @@
 
 import asyncio
 from datetime import datetime, timezone
+import json
 import logging
 from time import perf_counter
 
 from companion_v2.decision.conversation import decision_advice
 from companion_v2.decision.store import LayaSettingsError
-from companion_v2.execution.models import require, stamp
+from companion_v2.execution.models import digest, require, stamp
+from companion_v2.foundation.refs import ScopeKind
 from .group_admission import group_trigger_facts
 
 
@@ -95,6 +97,113 @@ def _role_state_summary(application, context):
     return summary or None
 
 
+def _role_profile_summary(application, context, at):
+    """Return a small persona slice for natural participation decisions.
+
+    Group context must not inherit a private participant's relationship memory,
+    but the role's own stable profile is safe and useful in every window where
+    that role speaks.
+    """
+
+    if application is None or context is None:
+        return None
+    owner = getattr(getattr(application, "messages", None), "role_profile_context", None)
+    if owner is None:
+        return None
+    try:
+        snapshot = owner.capture(context, at)
+    except Exception:
+        return None
+    fields = snapshot.get("fields") if isinstance(snapshot, dict) else None
+    if not isinstance(fields, dict):
+        return None
+    summary = {}
+    for key in ("personality", "speech_style", "social_distance", "reaction_patterns",
+                "tone", "motivations", "boundaries"):
+        value = fields.get(key)
+        if isinstance(value, str) and value.strip():
+            summary[key] = value.strip()[:240]
+    return summary or None
+
+
+def _group_memory_summary(application, context, event_id, at):
+    """Read bounded statements owned by this exact group, never private memory."""
+
+    if (application is None or context is None
+            or getattr(getattr(context, "scope", None), "kind", None) is not ScopeKind.GROUP):
+        return None
+    messages = getattr(application, "messages", None)
+    owner = getattr(getattr(messages, "group_memory", None), "context", None)
+    if owner is None:
+        return None
+    key = "laya-group-memory-" + digest([context.key, event_id or "", stamp(at)])
+    try:
+        from companion_v2.sources.dependencies import validation_batch
+
+        snapshot = owner.capture(context, key)
+        with validation_batch(getattr(messages, "runtime", None), key):
+            materials = owner.contributions(snapshot, context, key)
+        items = []
+        principal = getattr(getattr(context, "actor", None), "principal", None)
+        speaker_id = str(getattr(principal, "native_account_id", "") or "")
+        for material in materials:
+            data = json.loads(material.payload)
+            statement = " ".join(str(data.get("statement") or "").split())
+            if not statement:
+                continue
+            item_speaker = str(data.get("speaker_id") or "")
+            items.append({
+                "speaker_id": item_speaker[:128],
+                "said_at": str(data.get("said_at") or "")[:64],
+                "statement": statement[:600],
+                "speaks_for_current_actor": bool(speaker_id and item_speaker == speaker_id),
+            })
+        if not items:
+            return None
+        return {
+            "basis": "same_group_public_memory",
+            "visibility": "group",
+            "items": items[:4],
+        }
+    except Exception as error:
+        logger.debug("[CompanionV2] Laya 群公共记忆暂不可用 error_type=%s",
+                     type(error).__name__, exc_info=True)
+        return None
+
+
+def _group_participation_summary(application, context, native, trigger, at):
+    """Expose bounded role willingness and visible group atmosphere facts."""
+
+    if (application is None or context is None or native is None
+            or getattr(getattr(context, "scope", None), "kind", None) is not ScopeKind.GROUP):
+        return None
+    participation = getattr(getattr(application, "tools", None), "group_participation", None)
+    reply_settings = getattr(application, "reply_settings", None)
+    if participation is None or reply_settings is None:
+        return None
+    try:
+        from companion_v2.conversation.native_participation import native_participation_turn
+        from companion_v2.conversation.reply_settings import GROUP
+
+        snapshot = reply_settings.snapshot(context.actor, context, at)
+        settings = {key.removeprefix(GROUP + "."): value
+                    for key, value in snapshot.values.items()}
+        turn = native_participation_turn(
+            participation, context, native, settings, group_trigger=trigger)
+        compact = turn.get("compact_facts") if isinstance(turn, dict) else None
+        if not isinstance(compact, dict):
+            return None
+        result = {}
+        if isinstance(compact.get("observation"), dict):
+            result["observation"] = compact["observation"]
+        if isinstance(compact.get("interjection"), dict):
+            result["self_initiated_speech"] = compact["interjection"]
+        return result or None
+    except Exception as error:
+        logger.debug("[CompanionV2] Laya 群参与意愿暂不可用 error_type=%s", type(error).__name__)
+        return None
+
+
 def core_decision_facts(event, prepared, application, *, at):
     native, context = prepared.get("native_input"), prepared.get("context")
     scope = getattr(context, "scope", None)
@@ -134,9 +243,19 @@ def core_decision_facts(event, prepared, application, *, at):
     if prepared.get("channel") == "group":
         group_admission = prepared.get("group_admission") or {}
         facts["candidate_reason"] = group_admission.get("reason", "")
+        if isinstance(group_admission.get("familiarity"), dict):
+            facts["group_familiarity"] = dict(group_admission["familiarity"])
         if isinstance(group_admission.get("continuation"), dict):
             facts["group_continuation"] = dict(group_admission["continuation"])
         facts["group_participation_policy"] = dict(group_admission.get("participation_policy") or {})
+        memory_summary = _group_memory_summary(
+            application, context, prepared.get("event_id") or getattr(native, "event_id", None), at)
+        if memory_summary:
+            facts["group_memory_summary"] = memory_summary
+        participation_summary = _group_participation_summary(
+            application, context, native, trigger, at)
+        if participation_summary:
+            facts["group_participation_summary"] = participation_summary
         if isinstance(group_admission.get("question_reference"), dict):
             facts["question_reference"] = dict(group_admission["question_reference"])
         participation = getattr(getattr(application, "tools", None), "group_participation", None)
@@ -170,6 +289,9 @@ def core_decision_facts(event, prepared, application, *, at):
     state_summary = _role_state_summary(application, context)
     if state_summary:
         facts["role_state_summary"] = state_summary
+    profile_summary = _role_profile_summary(application, context, at)
+    if profile_summary:
+        facts["role_profile_summary"] = profile_summary
     return facts
 
 

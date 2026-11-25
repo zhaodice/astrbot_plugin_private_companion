@@ -18,6 +18,7 @@ from astrbot_host.controller import AstrBotStagingController
 from astrbot_host.reply_api import ReplyWebAPI
 from companion_v2.adapters.astrbot.staging import NativeAdapterTypes
 from companion_v2.foundation.outcome import Outcome
+from companion_v2.model_gateway.models import ToolSpec
 
 
 RECORD = {"type": "record", "data": {"file": "base64://YQ=="}}
@@ -127,6 +128,42 @@ class ReplyWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
 
 
 class SingleReplyWebAPITests(unittest.IsolatedAsyncioTestCase):
+    def test_tool_catalog_is_sanitized_and_reports_all_sources_and_disabled_state(self):
+        controller = NS(context=NS(get_llm_tool_manager=lambda: NS(func_list=(
+            NS(name="web_search", description="Search https://example.invalid token=TOP_SECRET",
+               mcp_server_name=None),
+            NS(name="mcp_docs_search", description="MCP docs lookup",
+               mcp_server_name="docs"),
+        ))))
+        session = NS(application=NS(tools=NS(catalog=(
+            ToolSpec(
+                "private.secret.read",
+                "Read https://private.invalid api_key=TOP_SECRET",
+                '{"hidden_schema":"schema-only-token"}',
+            ),
+        ))))
+        status = {"settings": {"mcp_disabled_tools": json.dumps([
+            "companion_v2_memory_global_query",
+            "mcp_docs_search",
+        ])}}
+
+        entries = ReplyWebAPI(controller)._tool_catalog(session, status)
+        by_id = {entry["id"]: entry for entry in entries}
+
+        self.assertEqual(
+            {entry["group"] for entry in entries},
+            {"companion", "relay", "native", "mcp"},
+        )
+        self.assertFalse(by_id["memory.global.query"]["enabled"])
+        self.assertFalse(by_id["mcp_docs_search"]["enabled"])
+        self.assertTrue(by_id["web_search"]["enabled"])
+        rendered = json.dumps(entries)
+        self.assertNotIn("https://", rendered)
+        self.assertNotIn("TOP_SECRET", rendered)
+        self.assertNotIn("schema-only-token", rendered)
+        self.assertNotIn("hidden_schema", rendered)
+        self.assertTrue(all(len(entry["description"]) <= 180 for entry in entries))
+
     async def test_style_list_runs_off_loop_without_holding_control_lock(self):
         entered, release = threading.Event(), threading.Event()
 

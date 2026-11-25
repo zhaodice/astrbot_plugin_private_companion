@@ -41,6 +41,17 @@ NATIVE_FEEDS = frozenset({"native_human", "native_reply"})
 logger = logging.getLogger(__name__)
 
 
+def observation_text(value):
+    """Canonical text for one native event.
+
+    Early observation and the later reply path can receive the same message
+    through slightly different host adapters.  Keep meaningful spacing while
+    removing transport-only whitespace differences so one event has one source.
+    """
+
+    return " ".join(value.split()) if isinstance(value, str) else ""
+
+
 def conversation_owner(context):
     return json.dumps([context.scope.installation_id, context.scope.bot_id,
                        context.role_binding.role.subject_id, context.actor.subject.subject_id],
@@ -201,19 +212,57 @@ class NativeConversationObservations:
                 accounts.add(account)
         return min(64, len(accounts))
 
-    def capture_input(self, context, native_input, *, turn_id):
+    def _validate_input(self, context, native_input):
         if (context.scope != native_input.route.scope or context.actor.principal != native_input.principal
                 or context.role_binding.role != native_input.role or context.audience != native_input.recipients):
             raise TaskError("native_observation_context_changed", "native input must keep its verified identity and route")
         self.messages.recalls.check(context.scope, native_input.event_id,
                                    context.actor.principal.native_account_id)
+
+    @staticmethod
+    def _input_identifier(context, native_input):
+        return "core-input-" + digest([context.scope, context.role_binding.role,
+                                       context.actor.subject, native_input.event_id])
+
+    def observe(self, context, native_input):
+        """Record an authenticated input without admitting a reply turn.
+
+        This is used only after Laya has been enabled for a group and no reply
+        candidate was admitted.  It writes the same stable source that a later
+        formal reply would use, so observing and then speaking is idempotent.
+        """
+
+        self._validate_input(context, native_input)
+        text = observation_text(native_input.text)
+        if not text:
+            return None
+        identifier = self._input_identifier(context, native_input)
+        return self._record(
+            context,
+            identifier,
+            "core-observe:" + digest([context.key, native_input.event_id]),
+            native_input.event_id,
+            text,
+            native_input.at,
+            kind="input",
+            state="input_observed",
+            awareness_enabled=self._awareness_enabled(context),
+            peer_count=self._peer_count(context, native_input.at),
+            quote_sender_ids=tuple(
+                quote.sender_id
+                for quote in getattr(native_input, "quotes", ())
+            ),
+        )
+
+    def capture_input(self, context, native_input, *, turn_id):
+        self._validate_input(context, native_input)
         from .native_turns import NativeConversationTurns
-        if not native_input.text.strip():
+        text = observation_text(native_input.text)
+        if not text:
             NativeConversationTurns(self.runtime).admit(context, native_input, turn_id, None)
             return None
-        identifier = "core-input-" + digest([context.scope, context.role_binding.role,
-                                             context.actor.subject, native_input.event_id])
-        reference = self._record(context, identifier, turn_id, native_input.event_id, native_input.text,
+        identifier = self._input_identifier(context, native_input)
+        reference = self._record(context, identifier, turn_id, native_input.event_id, text,
                                  native_input.at, kind="input", state="input_observed",
                                  awareness_enabled=self._awareness_enabled(context),
                                  peer_count=self._peer_count(context, native_input.at),
@@ -253,6 +302,9 @@ class NativeConversationObservations:
     def _record(self, context, identifier, turn_id, event_id, text, at, *, kind, state,
                 source_owner=None, awareness_enabled=False, peer_count=0, quote_sender_ids=()):
         require(self.tasks.check_context_access(context, action="conversation.reply", observed_at=self.tasks.now()))
+        text = observation_text(text)
+        if not text:
+            return None
         with self.runtime.transaction() as connection:
             existing = connection.execute("SELECT * FROM conversation_native_observations WHERE observation_id = ?",
                                           (identifier,)).fetchone()
@@ -261,12 +313,12 @@ class NativeConversationObservations:
             core_reply = owner in (INPUT_OWNER, ASSISTANT_OWNER)
             reference = SourceRef(identifier, owner,
                                   context.scope, VersionRef(identifier, 1), issued_at)
-            record = prepare_message(self.runtime, SourceRecord(reference, context.audience, digest(text), text))
-            require(self.sources.publish(record, observed_at=self.tasks.now()))
             if existing is not None:
                 from companion_v2.memory.codec import source
                 if (source(json.loads(existing["source_json"])) != reference
-                        or existing["content_hash"] != record.content_hash or existing["kind"] != kind):
+                        or existing["kind"] != kind
+                        or existing["memory_owner"] != owner_key(context)
+                        or existing["context_key"] != context.key):
                     raise TaskError("native_observation_conflict", "the original native observation changed")
                 if existing["delivery_state"] == state or existing["delivery_state"] == "send_returned":
                     if core_reply and kind == "assistant" and state == "send_returned":
@@ -276,6 +328,11 @@ class NativeConversationObservations:
                 connection.execute("UPDATE conversation_native_observations SET delivery_state = ? WHERE observation_id = ?",
                                    (state, identifier))
             else:
+                record = prepare_message(
+                    self.runtime,
+                    SourceRecord(reference, context.audience, digest(text), text),
+                )
+                require(self.sources.publish(record, observed_at=self.tasks.now()))
                 stamped_issued = stamp(issued_at)
                 scope_kind = context.scope.kind.value
                 role_binding_key = encode(context.role_binding)

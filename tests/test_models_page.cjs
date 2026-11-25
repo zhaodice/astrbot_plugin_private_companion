@@ -1719,6 +1719,9 @@ test('group Laya reads global settings and offers a visible same-role conversati
   assert.match(node.innerHTML, /私聊 测试用户/);
   assert.match(node.innerHTML, /当前群聊的近期决策记录暂不能按会话汇总/);
   assert.match(node.innerHTML, /Laya 决策模型/);
+  assert.match(node.innerHTML, /熟人发言、熟人提及和熟群消息也会作为候选/);
+  assert.match(node.innerHTML, /熟悉不等于必答，也不会强制逐句接话/);
+  assert.match(node.innerHTML, /可用群内记忆线索/);
   node.change('[data-laya-target]', {value: 'private'});
   assert.deepEqual(chosen, [['private', 'role']]);
   h.page.unmount();

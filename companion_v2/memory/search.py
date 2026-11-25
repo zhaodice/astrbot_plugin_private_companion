@@ -198,6 +198,53 @@ class SearchIndex:
                            (identifier, owner, fingerprint, encode(document)))
                 db.execute("INSERT INTO lexical(id, owner, tokens) VALUES (?, ?, ?)", (identifier, owner, " ".join(terms(document["text"]))))
 
+    def upsert_documents(self, owner, documents, *, relationship_owner=None):
+        """Incrementally add or replace documents without deleting other ids.
+
+        Cross-group recall is assembled from an authoritative query whose
+        candidate window can change between turns. ``sync`` is intentionally
+        unsuitable there because a smaller window would erase the rest of the
+        role's cache.
+        """
+        relationship_owner = owner if relationship_owner is None else relationship_owner
+        with closing(self._open()) as db, db:
+            db.execute(
+                "INSERT OR IGNORE INTO partition_owners(partition, owner) VALUES (?, ?)",
+                (owner, relationship_owner),
+            )
+            for document in documents:
+                identifier = document["id"]
+                fingerprint = digest(document)
+                row = db.execute(
+                    "SELECT hash FROM documents WHERE id = ? AND owner = ?",
+                    (identifier, owner),
+                ).fetchone()
+                if row is not None and row["hash"] == fingerprint:
+                    continue
+                db.execute("DELETE FROM lexical WHERE id = ? AND owner = ?", (identifier, owner))
+                db.execute("DELETE FROM vectors WHERE id = ? AND owner = ?", (identifier, owner))
+                db.execute(
+                    "INSERT INTO documents VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(id, owner) DO UPDATE SET hash = excluded.hash, "
+                    "document_json = excluded.document_json",
+                    (identifier, owner, fingerprint, encode(document)),
+                )
+                db.execute(
+                    "INSERT INTO lexical(id, owner, tokens) VALUES (?, ?, ?)",
+                    (identifier, owner, " ".join(terms(document["text"]))),
+                )
+
+    def remove_documents(self, owner, identifiers):
+        """Remove selected derived documents and every index entry they own."""
+        wanted = tuple(dict.fromkeys(identifiers))
+        if not wanted:
+            return
+        with closing(self._open()) as db, db:
+            for identifier in wanted:
+                db.execute("DELETE FROM lexical WHERE id = ? AND owner = ?", (identifier, owner))
+                db.execute("DELETE FROM vectors WHERE id = ? AND owner = ?", (identifier, owner))
+                db.execute("DELETE FROM documents WHERE id = ? AND owner = ?", (identifier, owner))
+
     def put_vector(self, owner, identifier, *, model, values, expected_hash):
         if not isinstance(model, str) or not model or type(values) is not tuple or not 1 <= len(values) <= 4096:
             raise ValueError("an embedding needs a model version and bounded vector")

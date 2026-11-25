@@ -404,6 +404,39 @@ window.CompanionWorkbench = (() => {
     const inputs = root?.querySelectorAll?.('input[data-wb-source-state="partial"]') || [];
     for (const input of inputs) input.indeterminate = true;
   };
+  /* 工具设置保存的是禁用清单，界面展示的是允许清单。把一次勾选换算成
+     新的禁用 JSON；未知旧项必须原样保留，否则工具目录暂时缺项时会被自动
+     重新启用。 */
+  const parseToolDenyList = value => {
+    const text = String(value ?? "").trim();
+    if (!text) return [];
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) {
+        return [...new Set(parsed.map(item => String(item ?? "").trim()).filter(Boolean))];
+      }
+    } catch {}
+    return [...new Set(text.split(/[\r\n,，;；]+/).map(item => item.trim()).filter(Boolean))];
+  };
+  function resolveToolChecklist(rawValue, descriptors, checkedIds) {
+    const descriptors_ = (Array.isArray(descriptors) ? descriptors : [])
+      .filter(item => item && typeof item.id === "string" && item.id.trim());
+    const checked = new Set((Array.isArray(checkedIds) ? checkedIds : [])
+      .map(id => String(id ?? "").trim()).filter(Boolean));
+    const known = new Set();
+    const disabled = [];
+    for (const descriptor of descriptors_) {
+      const id = descriptor.id.trim();
+      const native = String(descriptor.native_name || "").trim();
+      known.add(id);
+      if (native) known.add(native);
+      if (!checked.has(id)) disabled.push(id);
+    }
+    for (const id of parseToolDenyList(rawValue)) {
+      if (!known.has(id)) disabled.push(id);
+    }
+    return JSON.stringify([...new Set(disabled)].sort());
+  }
   /* 把一次复选框点击换算成新的 source_ids 文本。纯函数：不读 DOM、不改状态，
      事件处理器与测试共用同一份裁决，避免界面显示与写回值各算一套。
      返回 accepted=false 时 value 原样返回，调用方据此回滚这一次勾选。 */
@@ -828,6 +861,50 @@ window.CompanionWorkbench = (() => {
       return `<div class="wb-source-picker" data-wb-source-limit="${e(selectedLimit)}">`
         + (rows || `<div class="wb-empty-list">${e(empty)}</div>`)
         + `<span class="wb-source-count">已选 ${count} / ${selectedLimit} 项</span></div>`;
+    }
+    if (item.kind === "text" && item.input === "tool-checklist") {
+      const descriptors = item.catalog?.(state.status) || [];
+      const disabled = new Set(parseToolDenyList(value));
+      const seen = new Set();
+      const unique = descriptors.filter(descriptor => {
+        const id = String(descriptor?.id || "").trim();
+        if (!id || seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      });
+      const isDisabled = descriptor => disabled.has(String(descriptor.id || "").trim())
+        || disabled.has(String(descriptor.native_name || "").trim());
+      const option = (descriptor, group) => {
+        const id = String(descriptor.id || "").trim();
+        const name = String(descriptor.display_name || id);
+        const native = String(descriptor.native_name || "").trim();
+        const description = String(descriptor.description || "").trim();
+        return `<label class="wb-source-option${isDisabled(descriptor) ? "" : " is-enabled"}">`
+          + `<input type="checkbox" data-wb-field="${e(item.name)}" data-wb-tool-id="${e(id)}"`
+          + `${isDisabled(descriptor) ? "" : " checked"}${locked ? " disabled" : ""}>`
+          + `<span><b>${e(name)}</b><small>${e(id)}${native && native !== id ? ` · ${e(native)}` : ""}`
+          + `<em>${e(group === "mcp" ? "MCP" : group === "native" ? "AstrBot 原生" : group === "relay" ? "Relay" : "Companion")}</em>`
+          + `${description ? `<span>${e(description)}</span>` : ""}</small></span></label>`;
+      };
+      const companionRows = unique.filter(descriptor => ["companion", "relay"].includes(descriptor.group))
+        .map(descriptor => option(descriptor, descriptor.group)).join("");
+      const hostRows = unique.filter(descriptor => ["native", "mcp"].includes(descriptor.group))
+        .map(descriptor => option(descriptor, descriptor.group)).join("");
+      const known = new Set(unique.flatMap(descriptor =>
+        [String(descriptor.id || "").trim(), String(descriptor.native_name || "").trim()]).filter(Boolean));
+      const unknown = [...disabled].filter(id => !known.has(id));
+      const unknownRows = unknown.length
+        ? `<section class="wb-source-group"><h5>当前目录暂不可用，已保留禁用</h5>`
+          + unknown.map(id => `<label class="wb-source-option is-disabled"><input type="checkbox" checked disabled>`
+            + `<span><b>${e(id)}</b><small>工具目录中没有这一项；保存其他改动时不会删除这条禁用记录。</small></span></label>`).join("")
+          + `</section>` : "";
+      const enabledCount = unique.filter(descriptor => !isDisabled(descriptor)).length;
+      return `<div class="wb-source-picker wb-tool-picker">`
+        + (companionRows ? `<section class="wb-source-group"><h5>Companion / Relay</h5>${companionRows}</section>` : "")
+        + (hostRows ? `<section class="wb-source-group"><h5>AstrBot 原生 / MCP</h5>${hostRows}</section>` : "")
+        + unknownRows
+        + (unique.length ? "" : `<div class="wb-empty-list">当前尚未读取到工具目录；保存时仍会保留已有禁用项。</div>`)
+        + `<span class="wb-source-count">允许 ${enabledCount} / ${unique.length} 项 · 取消勾选即禁用</span></div>`;
     }
     if (item.kind === "text" && item.input === "identity-checklist") {
       let selected = [];
@@ -1962,6 +2039,23 @@ window.CompanionWorkbench = (() => {
       syncSourceIndeterminate(control);
     }
 
+    function applyToolValue(control, raw, descriptors) {
+      if (!control) return;
+      const disabled = new Set(parseToolDenyList(raw));
+      const usable = (Array.isArray(descriptors) ? descriptors : [])
+        .filter(item => item && typeof item.id === "string" && item.id.trim());
+      for (const input of control.querySelectorAll("[data-wb-tool-id]") || []) {
+        const descriptor = usable.find(item => item.id === input.dataset.wbToolId);
+        const off = disabled.has(input.dataset.wbToolId)
+          || disabled.has(String(descriptor?.native_name || ""));
+        input.checked = !off;
+      }
+      const enabled = usable.filter(item => !disabled.has(item.id)
+        && !disabled.has(String(item.native_name || ""))).length;
+      const count = control.querySelector(".wb-source-count");
+      if (count) count.textContent = `允许 ${enabled} / ${usable.length} 项 · 取消勾选即禁用`;
+    }
+
     function onInput(event) {
       const el = event.target;
       /* Native choice controls emit `input` before `change`. Repainting here
@@ -2016,6 +2110,19 @@ window.CompanionWorkbench = (() => {
         const row = el.closest(".wb-field");
         if (row) row.classList.toggle("is-dirty", state.base && result.value !== state.base[name]);
         applySourceValue(control, result.value);
+        return;
+      }
+      if (item.input === "tool-checklist" && el.type === "checkbox") {
+        const control = el.closest(".wb-tool-picker");
+        const descriptors = item.catalog?.(state.status) || [];
+        const checkedIds = [...(control?.querySelectorAll("[data-wb-tool-id]:checked") || [])]
+          .map(input => input.dataset.wbToolId);
+        const raw = resolveToolChecklist(state.draft[name], descriptors, checkedIds);
+        state.draft[name] = raw;
+        state.savedState = ""; state.ok = false;
+        const row = el.closest(".wb-field");
+        if (row) row.classList.toggle("is-dirty", state.base && raw !== state.base[name]);
+        applyToolValue(control, raw, descriptors);
         return;
       }
       if (item.input === "identity-checklist" && el.type === "checkbox") {
@@ -3164,6 +3271,7 @@ window.CompanionWorkbench = (() => {
   return {create, dismissScopeHints, scopeHintMarkup, scopeHintClick, scopeHintKeydown, scopeHintReset, scopeObjectForEndpoint, saveScopeLabel, errors, LAYER_LABELS, contract, valid, toDisplay, fromDisplay, choiceText,
     /* 来源清单的点击裁决是纯函数，事件处理器与测试共用它，避免界面与写回值各算一套。 */
     resolveSourceToggle,
+    resolveToolChecklist,
     /* 词条解析也对外：配置覆盖自检要拿它验证注册默认值读得懂，避免审计脚本
        再写一份解析规则、和页面一起写错。 */
     parseStringList,
@@ -3176,4 +3284,3 @@ window.CompanionWorkbench = (() => {
       } catch { return []; }
     })};
 })();
-

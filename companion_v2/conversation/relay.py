@@ -6,7 +6,8 @@
 
 产品口径（2026-10-19）：
 
-* 核心管理员可以让 bot 帮忙向白名单私聊或群聊递话；
+* 核心管理员可以让 bot 帮忙向白名单私聊或群聊递话；显式开启任意目标后
+  可改用任意格式有效的私聊账号或群聊目标；
 * 其他用户只能让 bot 给核心管理员递话；
 * 未开启、空文本、超长、目标不在白名单或发给自己一律拒绝。
 """
@@ -70,6 +71,7 @@ def plan_relay(request: RelayRequest, settings, *, actor_is_core: bool,
         allowed_groups=targets("allowed_groups"),
         enabled=settings.get("enabled") is True,
         require_confirm=settings.get("require_confirm") is not False,
+        allow_arbitrary_targets=settings.get("allow_arbitrary_targets") is True,
         max_chars=_text_setting(settings.get("max_text_chars"), DEFAULT_MAX_CHARS),
         member_relay_enabled=settings.get("member_relay_enabled") is not False,
         member_relay_max_chars=_text_setting(
@@ -93,6 +95,7 @@ def plan_relay(request: RelayRequest, settings, *, actor_is_core: bool,
         "code": decision.code,
         "chars": len(request.text or ""),
         "needs_confirm": decision.needs_confirm,
+        "allow_arbitrary_targets": settings.get("allow_arbitrary_targets") is True,
     }
     if not decision.allowed:
         return RelayPlan(decision, audit=audit)

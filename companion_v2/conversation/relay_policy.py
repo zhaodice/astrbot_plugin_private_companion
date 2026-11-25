@@ -2,7 +2,8 @@
 
 口径来自产品要求：
 
-* 核心管理员可以让 bot 帮忙向白名单私聊或群聊递话；
+* 核心管理员可以让 bot 帮忙向白名单私聊或群聊递话；明确开启
+  ``allow_arbitrary_targets`` 后，可改用任意格式有效的目标；
   且需要一次确认（避免模型自作主张把内容发出去）；
 * **其他用户**可以让 bot 给核心管理员递话——目标只能是核心管理员本人，
   不给他们发到任意窗口的能力；
@@ -55,6 +56,7 @@ class RelayDecision:
 def decide(request: RelayRequest, *, actor_is_core: bool, core_target_id: str,
            allowed_targets=(), allowed_groups=(), enabled: bool = True,
            require_confirm: bool = True,
+           allow_arbitrary_targets: bool = False,
            max_chars: int = MAX_TEXT_CHARS,
            member_relay_enabled: bool = True,
            member_relay_max_chars: int = MAX_TEXT_CHARS,
@@ -83,12 +85,12 @@ def decide(request: RelayRequest, *, actor_is_core: bool, core_target_id: str,
         if len(text) > max(1, int(max_chars)):
             return RelayDecision(False, DENIED_TEXT_TOO_LONG, f"递话内容超过 {max_chars} 字上限")
         if kind == "group":
-            if destination not in set(allowed_groups or ()):
+            if not allow_arbitrary_targets and destination not in set(allowed_groups or ()):
                 return RelayDecision(False, DENIED_GROUP,
                                      "核心管理员只能发到已加入白名单的群聊目标")
             return RelayDecision(True, ALLOWED, needs_confirm=bool(require_confirm),
                                  audience="admin_group")
-        if destination not in set(allowed_targets or ()):
+        if not allow_arbitrary_targets and destination not in set(allowed_targets or ()):
             return RelayDecision(False, DENIED_TARGET,
                                  "核心管理员只能发到已加入白名单的私聊目标")
         return RelayDecision(True, ALLOWED, needs_confirm=bool(require_confirm),

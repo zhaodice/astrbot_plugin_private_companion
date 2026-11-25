@@ -108,6 +108,30 @@ class CoreReplyObservations:
             pending.add_done_callback(observed)
         return pending
 
+    def observe(self, context, native_input):
+        """Remember an authenticated group input when no reply is admitted.
+
+        This deliberately omits reply-turn admission, expression feedback and
+        private-chat interventions.  The role-global source remains readable by
+        the same bounded memory query used after a normal reply.
+        """
+
+        if context.scope.kind is not ScopeKind.GROUP:
+            return None
+
+        def record():
+            self.session.authorize(context)
+            return self.owner.observe(context, native_input)
+
+        pending = self._schedule(record, context_key=context.key)
+        if pending is not None:
+            pending.add_done_callback(
+                lambda done: self.session.application.notify()
+                if not done.cancelled() and done.exception() is None
+                else None
+            )
+        return pending
+
     def _queue_intervention(self, context, ticket, *, delay=INTERVENTION_DEBOUNCE_SECONDS):
         if self._closed or context.scope.kind is not ScopeKind.PRIVATE:
             return None

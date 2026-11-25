@@ -63,14 +63,18 @@ class CoreReplyToolFixture(ExternalFixture):
         self.authorize_result = Outcome.success(True)
         self.native_event, self.request = self.prepare()
 
-    def prepare(self, event_id="native-event"):
+    def prepare(self, event_id="native-event", *, disabled_tools="[]"):
         event = FakeEvent()
 
         async def authorize(_prepared):
             self.authorized += 1
             return self.authorize_result
 
-        prepared = {"context": self.context, "event_id": event_id}
+        prepared = {
+            "context": self.context,
+            "event_id": event_id,
+            "mcp_disabled_tools": disabled_tools,
+        }
         prepare_core_reply_event(event, prepared, authorize=authorize)
         request = NS(func_tool=None, system_prompt="original persona")
         inject_core_reply_tools(event, request, application=self.app)
@@ -129,6 +133,38 @@ class CoreReplyToolsTests(CoreReplyToolFixture, unittest.IsolatedAsyncioTestCase
         self.assertIs(self.request.func_tool.get_tool("native_existing"), native)
         self.assertIs(native.handler, existing_handler)
         self.assertEqual(len(self.request.func_tool.tools), len(first) + 1)
+
+    async def test_disabled_companion_native_and_mcp_tools_are_hidden_and_guarded(self):
+        async def handler(event, **arguments):
+            return "native"
+
+        web = FunctionTool("web_search", "Search", {"type": "object"}, handler)
+        mcp = FunctionTool("mcp_docs_search", "Docs", {"type": "object"}, handler)
+        event, request = self.prepare(
+            "disabled-tools",
+            disabled_tools=json.dumps([
+                "memory.global.query",
+                "mcp_docs_search",
+            ]),
+        )
+        request.func_tool = ToolSet(tools=[web, mcp])
+        inject_core_reply_tools(event, request, application=self.app)
+
+        mounted = {tool.name for tool in request.func_tool.tools}
+        self.assertNotIn(native_tool_name("memory.global.query"), mounted)
+        self.assertNotIn("mcp_docs_search", mounted)
+        self.assertIn("web_search", mounted)
+
+        state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+        session = state["_tool_session"]
+        before = self.authorized
+        denied = json.loads(await session.call(
+            "memory.global.query",
+            self.wrapper("memory.global.query", {"query": "旧灯塔"}, event=event),
+            {"query": "旧灯塔"},
+        ))
+        self.assertEqual((denied["state"], denied["code"]), ("failed", "tool_disabled"))
+        self.assertEqual(self.authorized, before)
 
     def test_unadmitted_core_runner_is_never_wrapped(self):
         from astrbot_host.core_reply_tool_dispatch import CORE_TOOL_DISPATCH_EXTRA

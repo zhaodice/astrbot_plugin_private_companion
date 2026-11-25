@@ -508,11 +508,13 @@ window.CompanionConfigEditors = (() => {
     },
     relay: {
       title: "跨窗口与跨群递话",
-      note: "核心管理员向外递话默认开启，但仍只发白名单目标并默认先确认；"
+      note: "核心管理员向外递话默认开启，默认只发白名单目标并先确认；"
+        + "开启“允许任意目标”后，仍须明确给出有效私聊账号或群号，且每次发送继续经过确认、审计和幂等保护。"
         + "其他人向核心管理员递话也默认开启，可单独限制发送者、正文长度或直接关闭。",
       labels: {
         enabled: "允许核心管理员在本窗口向外递话",
         require_confirm: "你发起的递话需要先确认",
+        allow_arbitrary_targets: "允许核心管理员向任意有效群或好友发送",
         max_text_chars: "单次递话最长字数",
         allowed_targets: "可递话的私聊目标",
         allowed_groups: "可递话的群聊目标",
@@ -528,6 +530,8 @@ window.CompanionConfigEditors = (() => {
       helps: {
         enabled: "关闭后，核心管理员也不能通过本窗口向外递话；其他人向核心管理员递话不受此项影响。",
         require_confirm: "开启后，你发起的递话会先弹确认，确认后才真正发出。",
+        allow_arbitrary_targets: "风险更高：关闭时只能发到下方白名单；开启后核心管理员可指定任意有效私聊账号或已加入群聊。"
+          + "不会绕过总开关、确认、当前窗口自发送拦截、审计或未知结果不重试规则，群成员文本也不能改变该授权。",
         allowed_targets: "填私聊 id，多个用逗号分隔；留空表示你不能主动私聊递话。",
         allowed_groups: "填群号，多个用逗号分隔；群名会被解析到这些白名单群。",
         member_cache_minutes: "群列表和成员解析结果缓存多久，避免频繁请求平台。",
@@ -540,7 +544,8 @@ window.CompanionConfigEditors = (() => {
         member_relay_allowed_senders: "填私聊账号 ID，多个用逗号分隔；留空表示所有能私聊到你的人都可以递话。",
       },
       choices: {default_style: {original: "逐字原样", soft: "委婉一点", persona: "按角色语气"}},
-      order: ["enabled", "require_confirm", "max_text_chars", "allowed_targets", "allowed_groups",
+      order: ["enabled", "require_confirm", "allow_arbitrary_targets", "max_text_chars",
+              "allowed_targets", "allowed_groups",
               "member_cache_minutes", "prefer_relationship_names", "multi_target_limit",
               "default_style", "core_target_id", "member_relay_enabled",
               "member_relay_max_text_chars", "member_relay_allowed_senders"],
@@ -2099,5 +2104,4 @@ window.CompanionConfigEditors = (() => {
 
   return {create, spec, searchEntries, get errors() { return window.CompanionWorkbench?.errors || {}; }, endpointFor};
 })();
-
 

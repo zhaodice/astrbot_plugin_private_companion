@@ -249,7 +249,8 @@ class RelayToolPort:
         cache[key] = (time() + max(1, int(minutes)) * 60, value)
         return value
 
-    async def _resolve_group_target(self, context, hint, allowed_groups, cache_minutes=60):
+    async def _resolve_group_target(self, context, hint, allowed_groups, cache_minutes=60,
+                                    allow_arbitrary_targets=False):
         text = hint.strip() if isinstance(hint, str) else ""
         if ":GroupMessage:" in text:
             text = text.rsplit(":GroupMessage:", 1)[1].strip()
@@ -258,7 +259,7 @@ class RelayToolPort:
         if _PRIVATE_DESTINATION.fullmatch(text):
             return text
         allowed = self._setting_values(allowed_groups)
-        if text in allowed:
+        if allow_arbitrary_targets or text in allowed:
             return text
         cache_key = (context.scope.platform, context.scope.account_id)
         groups = self._cache_get(self._group_list_cache, cache_key)
@@ -277,7 +278,7 @@ class RelayToolPort:
                 continue
             group_id = str(item.get("group_id") or "").strip()
             group_name = str(item.get("group_name") or item.get("name") or "").strip()
-            if group_id and (not allowed or group_id in allowed):
+            if group_id and (allow_arbitrary_targets or not allowed or group_id in allowed):
                 detail.append((group_id, group_name))
         exact = [group_id for group_id, name in detail if text == group_id or text == name]
         hits = exact or [group_id for group_id, name in detail
@@ -448,7 +449,8 @@ class RelayToolPort:
             settings = self._settings(invocation)
             cache_minutes = settings.get("member_cache_minutes", 60)
             destination_id = await self._resolve_group_target(
-                invocation.context, destination_id, settings.get("allowed_groups", ""), cache_minutes)
+                invocation.context, destination_id, settings.get("allowed_groups", ""), cache_minutes,
+                settings.get("allow_arbitrary_targets") is True)
             arguments = {**arguments, "destination_id": destination_id}
             resolved = await self._resolve_group_mention(
                 invocation.context, destination_id, mention, cache_minutes,
@@ -589,7 +591,8 @@ class RelayToolPort:
             settings = self._settings(invocation)
             cache_minutes = settings.get("member_cache_minutes", 60)
             destination_id = await self._resolve_group_target(
-                invocation.context, destination_id, settings.get("allowed_groups", ""), cache_minutes)
+                invocation.context, destination_id, settings.get("allowed_groups", ""), cache_minutes,
+                settings.get("allow_arbitrary_targets") is True)
             if isinstance(mention, str):
                 mention = await self._resolve_group_mention(
                     invocation.context, destination_id, mention, cache_minutes,

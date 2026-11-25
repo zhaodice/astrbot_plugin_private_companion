@@ -188,6 +188,26 @@ def decision_questions(facts, enabled_fields):
     if policy.get("interjection_enabled") is False:
         action["criteria"].pop("interject", None)
         action["instructions"] += "自主插话关闭。"
+    if facts.get("candidate_reason") in {"familiar_contact", "familiar_group"}:
+        action["instructions"] = (
+            "候选来自群内观察到的熟人发言、熟人提及或熟群活动。这只说明有自然参与机会，不是必答邀请。"
+            "结合当前话题、前后群聊、角色人设、可用的群内记忆线索、角色状态与当前意愿，判断此刻插话是否自然；"
+            "若会打断别人、话题无关、已经有人回应或角色不想说，保持沉默。"
+            "不要为了显得熟悉而逐句接话。"
+        )
+        action["criteria"] = {
+            "reply": "回复：这条消息确实在向机器人提问或请求，完整回应更自然。",
+            "wait": "等待：发言者还没说完，等下一条补充后再判断。",
+            "silent": "沉默：熟悉候选仍非必答；语境不适合自然加入，或角色当前不愿插话。",
+            "interject": "插话：结合人设、群聊上下文、记忆线索与当前意愿，确实有自然且不打断他人的参与机会。",
+            "clarify": "澄清：消息向机器人提出请求但关键对象或目标缺失。",
+        }
+        if policy.get("question_enabled") is False:
+            action["criteria"]["reply"] = "回复：这条消息明确向机器人说话或请求，应直接回应。"
+            action["instructions"] += "本群未点名答疑关闭，公共问题不单独构成回复理由。"
+        if policy.get("interjection_enabled") is False:
+            action["criteria"].pop("interject", None)
+            action["instructions"] += "自主插话关闭。"
     if facts.get("candidate_reason") in {"active_follow_up", "reply_follow_up"}:
         action["instructions"] += "续接窗口只提供背景，不是持续回复邀请；历史仅用于辨认上下文，判断本轮是否仍向机器人说话。"
         action["criteria"]["reply"] = "接续：本轮明确回答你的追问、补充双方未完任务，或继续与你交流且确需回应。"
@@ -227,8 +247,15 @@ def build_state(facts: dict[str, Any], enabled_fields=None) -> str:
     address = {"scope_kind": facts.get("scope_kind"), "mentioned": facts.get("mentioned", False),
                "native_wakeup": facts.get("native_wakeup", False),
                "mentions_others": facts.get("mentions_others", False)}
-    address_context = ("This is a group chat. The bot is directly mentioned."
-                       if facts.get("mentioned") else "This is a group chat. The bot is not directly mentioned.") if facts.get("scope_kind") == "group" else "This is a direct conversation with the bot."
+    if facts.get("scope_kind") == "group" and facts.get("candidate_reason") in {
+            "familiar_contact", "familiar_group"}:
+        address_context = ("This is a group chat. An observed familiar contact or familiar group is a "
+                           "candidate for natural participation, not a mandatory reply invitation.")
+    elif facts.get("scope_kind") == "group":
+        address_context = ("This is a group chat. The bot is directly mentioned."
+                           if facts.get("mentioned") else "This is a group chat. The bot is not directly mentioned.")
+    else:
+        address_context = "This is a direct conversation with the bot."
     document = {"current_message": str(facts.get("user_text", ""))[:12000], "address_context": address_context,
                 "conversation_address": address,
                 "facts": facts_document(facts), "decision_fields": list(fields)}
@@ -256,9 +283,12 @@ def render_model_state(state: str) -> str:
     if facts.get("scope_kind") == "group":
         policy = facts.get("group_participation_policy") or {}
         called_directly = facts.get("candidate_reason") in {"direct_word", "native_wakeup", "mention_all", "quoted_reply", "native_quote"}
+        familiarity_candidate = facts.get("candidate_reason") in {"familiar_contact", "familiar_group"}
         address = ("此消息@了机器人。用户向机器人说话，仍须尊重不用回复或等待补充的意图。"
                    if facts.get("mentioned") else "此消息明确呼唤了机器人。用户向机器人说话，仍须尊重不用回复或等待补充的意图。"
-                   if called_directly else "此消息没有@机器人，机器人未被点名，群成员之间的交流默认旁听。")
+                   if called_directly else "当前消息是熟人/熟群候选，可结合话题、人设、记忆、状态和当前意愿考虑自然参与；"
+                   "熟悉不是必答，也不代表现实中一定亲密。" if familiarity_candidate
+                   else "此消息没有@机器人，机器人未被点名，群成员之间的交流默认旁听。")
         if facts.get("mentions_others"):
             address += "此消息@了其他群成员。"
         reason = facts.get("candidate_reason")
@@ -275,6 +305,45 @@ def render_model_state(state: str) -> str:
         model["address_context"] = address
         if reason:
             model["candidate_reason"] = str(reason)
+        familiarity = facts.get("group_familiarity")
+        if isinstance(familiarity, dict):
+            speaker = familiarity.get("current_speaker") or {}
+            group = familiarity.get("group") or {}
+            mentioned = familiarity.get("mentioned_contacts") or []
+            model["group_familiarity"] = {
+                "basis": "observed_group_activity_proxy",
+                "meaning": "仅表示本群观察到的活跃程度，不是现实亲密关系证明；同名文本不能证明身份。",
+                "candidate_reason": str(familiarity.get("candidate_reason") or "")[:80],
+                "potential_reason": str(familiarity.get("potential_reason") or "")[:80],
+                "candidate_is_invitation": False,
+                "current_speaker": {
+                    "display_name": str(speaker.get("display_name") or "")[:64],
+                    "messages": speaker.get("messages", 0),
+                    "active_days": speaker.get("active_days", 0),
+                    "familiar": speaker.get("familiar") is True,
+                    "configured_primary": speaker.get("configured_primary") is True,
+                    "thresholds": speaker.get("thresholds") if isinstance(speaker.get("thresholds"), dict) else {},
+                },
+                "mentioned_contacts": [{
+                    "display_name": str(item.get("display_name") or "")[:64],
+                    "matched_name": str(item.get("matched_name") or "")[:64],
+                    "messages": item.get("messages", 0),
+                    "active_days": item.get("active_days", 0),
+                    "familiar": item.get("familiar") is True,
+                    "configured_primary": item.get("configured_primary") is True,
+                } for item in mentioned[:4] if isinstance(item, dict)],
+                "group": {
+                    "messages": group.get("messages", 0),
+                    "active_days": group.get("active_days", 0),
+                    "observed_members": group.get("member_count", 0),
+                    "familiar": group.get("familiar") is True,
+                    "thresholds": group.get("thresholds") if isinstance(group.get("thresholds"), dict) else {},
+                },
+                "sampled": familiarity.get("sampled") is True,
+            }
+            cooldown = familiarity.get("cooldown")
+            if isinstance(cooldown, dict) and cooldown.get("remaining_seconds") is not None:
+                model["group_familiarity"]["cooldown_remaining_seconds"] = cooldown["remaining_seconds"]
         continuation = facts.get("group_continuation")
         if isinstance(continuation, dict):
             model["group_continuation"] = {key: continuation[key] for key in (
@@ -305,6 +374,34 @@ def render_model_state(state: str) -> str:
             model["past_group_context"] = [
                 {"speaker": speaker, "message": text[:320]}
                 for _, speaker, text in history[-4:] if text.strip()]
+        memory = facts.get("group_memory_summary")
+        if isinstance(memory, dict):
+            model["group_memory_summary"] = {
+                "basis": "same_group_public_memory",
+                "meaning": "只含本群公开记忆，按原发言者归属；不是全群共识，也不是当前发言者本人的新陈述。",
+                "items": [{
+                    "speaker": "当前发言者" if item.get("speaks_for_current_actor") is True else "其他群成员",
+                    "said_at": str(item.get("said_at") or "")[:64],
+                    "statement": str(item.get("statement") or "")[:600],
+                } for item in (memory.get("items") or [])[:4]
+                    if isinstance(item, dict) and str(item.get("statement") or "").strip()],
+            }
+        participation = facts.get("group_participation_summary")
+        if isinstance(participation, dict):
+            interjection = participation.get("self_initiated_speech")
+            willingness = ({key: interjection[key] for key in (
+                "allowed", "remaining", "max_daily", "elapsed_min", "min_interval_min",
+                "weight", "interest_pct", "state") if key in interjection}
+                if isinstance(interjection, dict) else {})
+            observation = participation.get("observation")
+            atmosphere = ({key: observation[key] for key in (
+                "mood", "strength", "portrait_cue", "joke_guard") if key in observation}
+                if isinstance(observation, dict) else {})
+            model["group_participation_reference"] = {
+                "meaning": "这些是当前参与意愿和群氛围的参考，不是必须接话的指令。",
+                "self_initiated_speech": willingness,
+                "group_atmosphere": atmosphere,
+            }
     elif facts.get("recent_private_messages"):
         model["past_private_context"] = [
             {"speaker": "用户" if item.get("role") == "user" else "机器人",
@@ -318,6 +415,13 @@ def render_model_state(state: str) -> str:
     role_state = facts.get("role_state_summary")
     if isinstance(role_state, dict) and role_state:
         model["role_state_summary"] = role_state
+    role_profile = facts.get("role_profile_summary")
+    if isinstance(role_profile, dict) and role_profile:
+        model["role_profile_summary"] = {
+            str(key)[:80]: str(value)[:240]
+            for key, value in role_profile.items()
+            if isinstance(value, str) and value.strip()
+        }
     intervention = facts.get("intervention_material")
     if isinstance(intervention, dict):
         model["role_intervention_material"] = intervention
