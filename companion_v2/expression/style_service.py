@@ -332,7 +332,20 @@ def parse_output(raw, *, allowed_evidence, default_channels=None, limit=learning
         return learning.parse_output(raw, allowed_evidence=allowed_evidence,
                                      default_channels=default_channels, limit=limit)
     except ValueError as error:
-        raise TaskError("expression_output_invalid", str(error) or "expression output is invalid") from error
+        detail = str(error) or "unclassified"
+        output_details = frozenset({
+            "invalid_json", "invalid_shape", "invalid_signal", "invalid_applicability",
+            "invalid_confidence", "invalid_evidence", "invalid_expression_form",
+        })
+        if detail not in output_details:
+            detail = "unclassified"
+        elif detail == "invalid_json" and isinstance(error.__cause__, json.JSONDecodeError):
+            # A parser offset explains an empty or prose-only answer without
+            # retaining any of the model-authored text.
+            cause = error.__cause__
+            detail = f"invalid_json:line_{cause.lineno}:column_{cause.colno}"
+        raise TaskError("expression_output_invalid", str(error) or "expression output is invalid",
+                        details={"output_detail": detail}) from error
 
 
 # How long one admitted attempt may keep a material batch to itself. A model
@@ -822,7 +835,21 @@ class ExpressionStyleService:
                        epoch, "none" if retry == "no" else str(retry_wait_seconds(epoch)) + "s",
                        "yes" if observation.get("truncated") else "no", timing("assemble_ms"),
                        timing("wait_ms"), timing("parse_ms"), timing("commit_ms"))
+        self._note_output_failure(identifier, observation, code)
         self._note_refusal(observation, code)
+
+    @staticmethod
+    def _note_output_failure(identifier, observation, code):
+        """Name the bounded parser code behind ``expression_output_invalid``."""
+        if code != "expression_output_invalid":
+            return
+        diagnosis = observation.get("diagnosis")
+        detail = diagnosis.get("output_detail") if isinstance(diagnosis, dict) else None
+        if type(detail) is not str or not detail:
+            detail = "unavailable"
+        logger.warning("[CompanionV2] expression learning output contract failed task=%s "
+                       "material=%s stage=parse detail=%s", identifier,
+                       str(observation.get("material_hash") or "")[:12], detail)
 
     @staticmethod
     def _retry_reason(code, retry, epoch):
@@ -843,7 +870,7 @@ class ExpressionStyleService:
         these numbers the operator has to guess which of the two ends to edit.
         """
         diagnosis = observation.get("diagnosis")
-        if not isinstance(diagnosis, dict) or not diagnosis:
+        if not isinstance(diagnosis, dict) or "saved_max_output_tokens" not in diagnosis:
             return
         logger.warning("[CompanionV2] 表达学习上限配置与模型能力不匹配 stage=%s code=%s "
                        "saved_max_output_tokens=%s provider_max_output_tokens=%s "
@@ -2552,8 +2579,7 @@ class ExpressionStyleService:
             worker = self.workers.get(work_key)
             if worker is not None and not worker.done():
                 return {"state": "running"}
-            worker = asyncio.create_task(self.run(context, instruction),
-                                         name="companion:expression-learn")
+            worker = self._launch_worker(context, instruction)
             self.workers[work_key] = worker
         worker.add_done_callback(lambda done: self.app.notify())
         self.app.notify()

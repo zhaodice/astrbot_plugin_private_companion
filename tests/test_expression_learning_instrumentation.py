@@ -301,6 +301,29 @@ class LearningInstrumentationTests(ExpressionFixture, HostFixture, unittest.Isol
         self.assertNotIn(USER_MARKER, text, "the sampled messages must never reach the log")
         self.assertNotIn(PERSONA_MARKER, text, "the prompt body must never reach the log")
 
+    async def test_an_invalid_output_logs_its_bounded_contract_detail(self):
+        app, context = await self.prepare()
+        output_marker = "this is not json"
+
+        async def malformed(_envelope):
+            return answered(output_marker)
+
+        self.model_behavior = malformed
+        with self.assertLogs(LOGGER, level="INFO") as logs:
+            last = await self.learn(app, context)
+
+        self.assertEqual((last["state"], last["code"]),
+                         ("failed", "expression_output_invalid"), last)
+        failure_lines = lines_with(logs, "expression learning output contract failed")
+        self.assertEqual(len(failure_lines), 1, logs.output)
+        failure = fields(failure_lines[0])
+        self.assertEqual(failure["stage"], "parse")
+        self.assertTrue(failure["detail"].startswith("invalid_json:line_"), failure)
+        text = "\n".join(logs.output)
+        self.assertNotIn(output_marker, text)
+        self.assertNotIn("saved_max_output_tokens=", text,
+                         "an output-contract failure is not a ceiling mismatch")
+
     async def test_a_repeated_candidate_is_counted_by_the_dedupe_that_dropped_it(self):
         """A duplicate has to move a counter, or the parse line cannot explain a loss."""
         app, context = await self.prepare()
