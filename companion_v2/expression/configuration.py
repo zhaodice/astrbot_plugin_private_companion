@@ -47,6 +47,7 @@ LIMITS = {
     "group_scan_interval_minutes": (5, 10080),
     "group_daily_batch_limit": (1, 50),
     "group_new_messages": (5, 80),
+    "sample_review_auto_after": (0, 64),
 }
 PROBABILITY_LIMITS = {"minimum_confidence": (0.0, 1.0)}
 DEFAULTS = {
@@ -69,6 +70,7 @@ DEFAULTS = {
     "private_application_enabled": True,
     "group_application_enabled": True,
     "sample_review_enabled": False,
+    "sample_review_auto_after": 0,
     "style_review_enabled": True,
     "group_daily_batch_limit": 6,
     "group_new_messages": 20,
@@ -396,6 +398,7 @@ class ExpressionLearningSettings:
     private_application_enabled: bool = True
     group_application_enabled: bool = True
     sample_review_enabled: bool = False
+    sample_review_auto_after: int = 0
     style_review_enabled: bool = True
     group_daily_batch_limit: int = 6
     group_new_messages: int = 20

@@ -312,6 +312,55 @@ class ExpressionReplyPipelineTests(ExpressionFixture, HostFixture, unittest.Isol
         metadata = app.runtime.read_all("SELECT value FROM runtime_metadata WHERE key LIKE 'expression.sample_review.v1:%'", ())
         self.assertFalse(any("嗯哼" in item["value"] for item in metadata), "decisions never persist raw writing")
 
+    async def test_auto_review_waits_below_the_configured_pending_threshold(self):
+        host = await self.start()
+        app = host.application
+        context = await self.seed(host, count=3)
+        self.configure_expression(app, {"private_learning_enabled": True,
+                                        "sample_review_enabled": True,
+                                        "sample_review_auto_after": 4})
+        manager = ExpressionStyleManagement(app)
+        self.assertEqual(manager.learn(operator=self.core, context=context).unwrap()["state"],
+                         "waiting_for_sample_review")
+        listing = manager.list_samples(operator=self.core, context=context).unwrap()
+        self.assertEqual(listing["counts"]["pending"], 3)
+        self.assertEqual(listing["sample_review_auto_after"], 4)
+
+    async def test_auto_review_approves_the_pending_pool_without_restoring_rejected_samples(self):
+        host = await self.start()
+        app = host.application
+        context = await self.seed(host, count=4)
+        self.configure_expression(app, {"private_learning_enabled": True,
+                                        "sample_review_enabled": True,
+                                        "sample_review_auto_after": 3})
+        manager = ExpressionStyleManagement(app)
+        pending = manager.list_samples(operator=self.core, context=context, state="pending").unwrap()
+        rejected = pending["items"][0]
+        manager.sample_command(operator=self.core, context=context, handle=rejected["handle"],
+            action="reject", view_token=rejected["view_token"], operation_key="auto-review-reject").unwrap()
+
+        await self.learn_now(app, context)
+        approved = manager.list_samples(operator=self.core, context=context, state="approved").unwrap()
+        excluded = manager.list_samples(operator=self.core, context=context, state="rejected").unwrap()
+        self.assertEqual(approved["counts"]["approved"], 3)
+        self.assertEqual(excluded["counts"]["rejected"], 1)
+        self.assertEqual(excluded["items"][0]["handle"], rejected["handle"])
+        metadata = app.runtime.read_all(
+            "SELECT value FROM runtime_metadata WHERE key LIKE 'expression.sample_review.v1:%'", ())
+        decisions = [json.loads(item["value"]) for item in metadata]
+        self.assertEqual(sum(item["decided_by"] == "system:auto_review" for item in decisions), 3)
+        self.assertFalse(any("嗯哼" in item["value"] for item in metadata),
+                         "automatic review decisions never persist raw writing")
+
+        policy = read_settings(app.runtime, context)
+        pool = app.expression_style.samples.inspect_inputs(
+            context, self.clock.now(), window_hours=policy.window_hours,
+            sample_chars=policy.sample_chars)
+        self.assertEqual(app.expression_style.samples.reviews.auto_approve_pending(
+            context, pool.samples, self.clock.now(), threshold=3), 0)
+        self.assertEqual(manager.list_samples(operator=self.core, context=context,
+                                              state="rejected").unwrap()["counts"]["rejected"], 1)
+
     async def test_rejected_source_or_application_switch_stops_injection_without_blocking_reply(self):
         host = await self.start()
         app = host.application

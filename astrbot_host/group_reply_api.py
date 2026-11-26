@@ -325,9 +325,10 @@ class GroupReplyWebAPI:
             # reads: it aggregates every source the same way and already
             # tolerates both the old and the new shape of the hosted
             # ``status()`` payload.
-            page.update(sample_review_enabled=False, runtime={
+            page.update(sample_review_enabled=False, sample_review_auto_after=0, runtime={
                 "last_result": None, "running": False, "learning_enabled": False,
                 "application_enabled": False, "minimum_samples": 0, "eligible_samples": 0,
+                "sample_review_auto_after": 0,
                 "new_messages": None, "required_new_messages": None,
                 "group_batches_today": 0, "group_daily_batch_limit": 0})
         return page

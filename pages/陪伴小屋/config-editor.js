@@ -708,6 +708,7 @@ window.CompanionConfigEditors = (() => {
         private_application_enabled: "私聊应用规则",
         group_application_enabled: "群聊应用规则",
         sample_review_enabled: "审核原始样本",
+        sample_review_auto_after: "待审素材自动审核阈值 / 条",
         style_review_enabled: "发送前表达复核",
         group_daily_batch_limit: "角色群聊每日学习批次",
         group_new_messages: "群聊新增消息门槛",
@@ -718,12 +719,13 @@ window.CompanionConfigEditors = (() => {
         private_application_enabled: "把学到的表达用在私聊回复里；关闭后仍可继续学习，只是不拿来回复。",
         group_application_enabled: "把学到的表达用在群聊回复里；关闭后群聊不受学习结果影响。",
         sample_review_enabled: "原始样本先进入待整理区，由你确认后再归纳成规则；未审核规则不会自动启用。",
+        sample_review_auto_after: "仅在开启“审核原始样本”时生效；0 表示关闭。当前时间窗内待审素材达到该数量后，统一允许进入学习；已排除素材不会恢复。仍受扫描间隔、群聊新增消息和样本门槛影响。",
         minimum_confidence: "低于这个分数的单条候选不进入待审，减少一次性口癖和偶然句式；0 表示不过滤，默认 0.65。",
         style_review_enabled: "回复发出前检查是否学过头、照抄或断句不自然；只做小幅修正，不改事实和承诺。",
       },
       choices: {learning_mode: {light: "轻量", balanced: "均衡", aggressive: "深入"}},
       order: ["learning_mode", "private_application_enabled", "group_application_enabled",
-        "sample_review_enabled", "style_review_enabled", "window_hours", "sample_limit",
+        "sample_review_enabled", "sample_review_auto_after", "style_review_enabled", "window_hours", "sample_limit",
         "min_samples", "group_min_samples", "sample_chars", "minimum_confidence", "scan_interval_minutes",
         "group_scan_interval_minutes",
         "group_daily_batch_limit", "group_new_messages", "active_signal_limit",
@@ -732,7 +734,8 @@ window.CompanionConfigEditors = (() => {
         {id: "behavior", title: "应用与复核", fields: ["learning_mode", "private_application_enabled",
           "group_application_enabled", "sample_review_enabled", "style_review_enabled"]},
         {id: "sampling", title: "采样策略", fields: ["window_hours", "sample_limit", "min_samples",
-          "group_min_samples", "sample_chars", "minimum_confidence", "scan_interval_minutes", "group_scan_interval_minutes",
+          "group_min_samples", "sample_chars", "minimum_confidence", "sample_review_auto_after",
+          "scan_interval_minutes", "group_scan_interval_minutes",
           "group_daily_batch_limit",
           "group_new_messages"]},
         {id: "rotation", title: "规则容量", fields: ["active_signal_limit", "rules_per_turn",
@@ -2111,4 +2114,3 @@ window.CompanionConfigEditors = (() => {
 
   return {create, spec, searchEntries, get errors() { return window.CompanionWorkbench?.errors || {}; }, endpointFor};
 })();
-

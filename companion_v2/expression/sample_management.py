@@ -58,6 +58,7 @@ class ExpressionSampleManagement:
                     "eligible": eligible,
                     "view_token": self._token(operator, context, value, revision)})
         return {"items": items[:limit], "counts": counts, "sample_review_enabled": policy.sample_review_enabled,
+                "sample_review_auto_after": policy.sample_review_auto_after,
                 "next_cursor": items[limit - 1]["handle"] if len(items) > limit else None,
                 "context_key": context.key, "runtime": {**self.app.expression_style.status(context),
                     "eligible_samples": min(eligible_count, policy.sample_limit)}}
