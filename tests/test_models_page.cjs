@@ -3633,6 +3633,35 @@ test('saveGlobalDefaults preserves success state if silent GET refresh fails', a
   }
 });
 
+test('a preflight save rejection is visible inside the inspector instead of behind the scrim', async () => {
+  const h = harness(), node = h.root(), data = status();
+  h.page.mount(node);
+  try {
+    h.requests[0].resolve(data);
+    await flush();
+    node.click('[data-model-open]', {modelOpen: 'memory.reflect'});
+    node.change('[data-model-field]', {
+      modelField: 'max_output_tokens', modelKind: 'memory.reflect', value: '32768', valueAsNumber: 32768,
+    });
+    node.click('[data-model-action]', {modelAction: 'save-one', modelKind: 'memory.reflect'});
+
+    assert.equal(h.requests.some(request => request.method === 'POST'), false);
+    const card = node.innerHTML.split('data-fncard="memory.reflect"')[1].split('</article>')[0];
+    assert.match(card, /data-model-save-feedback/);
+    assert.match(card, /输出上限 32768 超过所选模型提供方的 8192/);
+  } finally {
+    h.page.unmount();
+  }
+});
+
+test('live model surfaces own delegated click handling above the drawer scrim', () => {
+  assert.match(source, /function liveSurfaceClick\(event\) \{\s*event\.stopPropagation\?\.\(\);\s*click\(event\);/);
+  assert.match(source, /wsMain\.addEventListener\("click", liveSurfaceClick\)/);
+  assert.match(source, /wsDock\.addEventListener\("click", liveSurfaceClick\)/);
+  assert.match(source, /wsDrawer\.addEventListener\("click", liveSurfaceClick\)/);
+  assert.match(source, /wsDrawer\.removeEventListener\("click", liveSurfaceClick\)/);
+});
+
 test('models-page.css pins narrow-screen routing row edit button to top-right and hides empty diff chips', () => {
   const css = fs.readFileSync(path.resolve(__dirname, '../pages/陪伴小屋/models-page.css'), 'utf8');
   assert.match(css, /\.model-diff-chips:empty\s*\{\s*display:\s*none\s*\}/);

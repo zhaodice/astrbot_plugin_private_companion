@@ -562,6 +562,8 @@ window.CompanionModelsPage = (() => {
       <button type="button" class="button small" data-model-action="refresh" ${s.loading || s.busy ? "disabled" : ""}>刷新配置</button></div>`; }
   function notice(s) { const text = s.notice || (s.loading ? "正在读取任务配置…" : "点击任意任务行即可在右侧抽屉精调；改动保存后在下一次任务生效。");
     return `<div class="model-notice ${s.bad ? "error" : ""}" role="status" aria-live="polite">${esc(text)}</div>`; }
+  const inspectorFeedback = s => (s.bad || s.busy) && s.notice
+    ? `<div class="model-alert" data-model-save-feedback role="status" aria-live="polite">${esc(s.notice)}</div>` : "";
   function globalDefaultsCard(s) {
     if (!s.status) return "";
     const g = globalDefaultsInfo(s);
@@ -852,6 +854,7 @@ window.CompanionModelsPage = (() => {
           ${inspectorHeader(s, task, info, draft, badge)}
           <div class="model-insp-body">
             ${conflictNotice(task, draft)}
+            ${inspectorFeedback(s)}
             ${draft.pending ? '<div class="model-alert">上次保存结果未确认，请核对原保存。</div>' : ""}
             <section class="model-insp-sec">
               <div class="model-insp-sec-h"><b>对话附加提示</b><span class="model-char-count" data-model-prompt-count="${esc(task.kind)}">${promptValue.length} / 8000</span></div>
@@ -910,6 +913,7 @@ window.CompanionModelsPage = (() => {
           ${inspectorHeader(s, task, info, draft, badge)}
           <div class="model-insp-body">
             ${conflictNotice(task, draft)}
+            ${inspectorFeedback(s)}
             ${draft.pending ? '<div class="model-alert">上次保存结果未确认。请核对原操作，避免重复提交。</div>' : ""}
             <section class="model-insp-sec">
               <div class="model-insp-sec-h"><b>核心路由</b><span class="model-state ${draft.pending ? "warn" : ""}">${esc(draft.pending ? "待核对原保存" : adoption(task.application_state))}</span></div>
@@ -3721,6 +3725,9 @@ ${mode === "remote" && (l.draft.request_format || l.data.request_format) === "cl
     if (wsShell && wsShell.parentNode === root && wsMain && wsDock && wsMask && wsDrawer && wsQuotaModalHost) return;
     if (wsDrawer) wsDrawer.removeEventListener("transitionend", handleDrawerTransitionEnd);
     if (wsDock) wsDock.removeEventListener("transitionend", handleDockTransitionEnd);
+    if (wsDrawer) wsDrawer.removeEventListener("click", liveSurfaceClick);
+    if (wsDock) wsDock.removeEventListener("click", liveSurfaceClick);
+    if (wsMain) wsMain.removeEventListener("click", liveSurfaceClick);
     root.innerHTML = "";
     wsShell = document.createElement("div");
     wsShell.className = "model-workspace";
@@ -3732,6 +3739,7 @@ ${mode === "remote" && (l.draft.request_format || l.data.request_format) === "cl
     wsDock.setAttribute("aria-label", "已选任务批量操作");
     wsDock.setAttribute("aria-hidden", "true");
     wsDock.inert = true;
+    wsDock.addEventListener("click", liveSurfaceClick);
     wsDock.addEventListener("transitionend", handleDockTransitionEnd);
     wsMask = document.createElement("div");
     wsMask.className = "model-mask";
@@ -3742,11 +3750,13 @@ ${mode === "remote" && (l.draft.request_format || l.data.request_format) === "cl
     wsDrawer.setAttribute("aria-modal", "true");
     wsDrawer.setAttribute("aria-hidden", "true");
     wsDrawer.inert = true;
+    wsDrawer.addEventListener("click", liveSurfaceClick);
     wsDrawer.addEventListener("transitionend", handleDrawerTransitionEnd);
     wsQuotaModalHost = document.createElement("div");
     wsQuotaModalHost.className = "qw-modal-host";
     wsQuotaModalHost.setAttribute("data-qw-modal-host", "");
     wsQuotaModalHost.setAttribute("aria-hidden", "true");
+    wsMain.addEventListener("click", liveSurfaceClick);
     wsShell.appendChild(wsMain);
     wsShell.appendChild(wsDock);
     wsShell.appendChild(wsMask);
@@ -3963,6 +3973,15 @@ ${mode === "remote" && (l.draft.request_format || l.data.request_format) === "cl
     if (s.tab === "pricing") { pricingWorkbench()?.handleClick?.(pricingCtx(s), event); return; }
     if (s.tab === "quota") { quotaWorkbench()?.handleClick?.(quotaCtx(s), event); return; }
     fnClick(event); }
+  /* The live shell splits controls across the main surface, the selection dock
+     and the inspector drawer. Bind each surface as its own delegation root:
+     clicks in the drawer sit above a fixed scrim and must not depend on a click
+     path through the dimmed main surface. Stopping here also prevents the
+     outer root from dispatching the same action twice. */
+  function liveSurfaceClick(event) {
+    event.stopPropagation?.();
+    click(event);
+  }
   function providerHover(event) {
     window.CompanionWorkbench.scopeHintReset(event);
     const s = state; if (!s || !root?.isConnected) return;
@@ -3989,6 +4008,9 @@ ${mode === "remote" && (l.draft.request_format || l.data.request_format) === "cl
     if (advAnimTimer) { clearTimeout(advAnimTimer); advAnimTimer = null; }
     if (wsDrawer) wsDrawer.removeEventListener("transitionend", handleDrawerTransitionEnd);
     if (wsDock) wsDock.removeEventListener("transitionend", handleDockTransitionEnd);
+    if (wsDrawer) wsDrawer.removeEventListener("click", liveSurfaceClick);
+    if (wsDock) wsDock.removeEventListener("click", liveSurfaceClick);
+    if (wsMain) wsMain.removeEventListener("click", liveSurfaceClick);
     wsShell = wsMain = wsDock = wsMask = wsDrawer = wsQuotaModalHost = null; overlayWasOpen = false; dockWasOpen = false; dockHadReport = false;
     deferChangeRender = false; deferredRenderPending = false;
     if (root) { window.CompanionWorkbench.dismissScopeHints(root); root.removeEventListener("input", input); root.removeEventListener("change", input); root.removeEventListener("click", click); root.removeEventListener("pointerdown", handlePointerDown); root.removeEventListener("pointerover", providerHover); root.removeEventListener("pointerout", providerHover); root.removeEventListener("keydown", window.CompanionWorkbench.scopeHintKeydown); root.removeEventListener("focusin", window.CompanionWorkbench.scopeHintReset); root.removeEventListener("focusout", window.CompanionWorkbench.scopeHintReset); }
