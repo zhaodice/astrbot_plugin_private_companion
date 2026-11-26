@@ -325,6 +325,7 @@ class ExpressionReplyPipelineTests(ExpressionFixture, HostFixture, unittest.Isol
         listing = manager.list_samples(operator=self.core, context=context).unwrap()
         self.assertEqual(listing["counts"]["pending"], 3)
         self.assertEqual(listing["sample_review_auto_after"], 4)
+        self.assertEqual(listing["runtime"]["learning_signal_limit"], 2)
 
     async def test_auto_review_approves_the_pending_pool_without_restoring_rejected_samples(self):
         host = await self.start()
