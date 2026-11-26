@@ -258,6 +258,15 @@ class DerivedLimitTests(unittest.TestCase):
             parse_output(json.dumps(learning_payload(2), ensure_ascii=False),
                          allowed_evidence={"input:a", "input:b"}, limit=1)
         self.assertEqual(caught.exception.code, "expression_output_invalid")
+        self.assertEqual(caught.exception.details["output_detail"], "invalid_shape")
+
+    def test_invalid_json_keeps_only_a_bounded_parser_location(self):
+        with self.assertRaises(TaskError) as caught:
+            parse_output("{nope", allowed_evidence={"input:a"})
+        self.assertEqual(caught.exception.code, "expression_output_invalid")
+        detail = caught.exception.details["output_detail"]
+        self.assertTrue(detail.startswith("invalid_json:line_"), detail)
+        self.assertNotIn("nope", detail)
 
     def test_a_wider_limit_never_raises_the_product_cap(self):
         # ``limit`` narrows the ask; it must never widen the per-run maximum, or
