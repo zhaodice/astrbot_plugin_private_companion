@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import unittest
 
-from companion_v2.conversation.awareness_context import ConversationAwarenessContext
+from companion_v2.conversation.awareness_context import ConversationAwarenessContext, INSTRUCTION
 from companion_v2.execution.models import AudienceRef, TaskContext, TaskError, encode
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind, ScopeRef, SourceRef, SubjectKind, SubjectRef, VersionRef
@@ -331,6 +331,31 @@ class RoleAwarenessTests(unittest.TestCase):
         self.assertIn("【跨窗口在场】", section)
         self.assertIn("cross_window_awareness", section)
         self.assertIn("明天谁有空", json.loads(json.dumps(section, ensure_ascii=False)))
+
+    def test_private_prompt_prioritizes_the_current_window_over_cross_window_memory(self):
+        self.record_group(text="周末去杭州还是苏州？")
+        messages = type("Messages", (), {"cross_window_context": self.prompt})()
+        section = _cross_window_section(messages, self.private, NOW + timedelta(minutes=2)).render()
+
+        self.assertIn("当前对话窗口自身的会话历史、本轮消息、当前称呼与关系是主上下文", section)
+        self.assertIn("跨窗口在场只是同一角色在另一个窗口实际看到或说过的有限辅助片段", section)
+        self.assertIn("若跨窗口线索和当前窗口历史或本轮表达冲突", section)
+        self.assertIn("以当前窗口为准", section)
+
+    def test_handoff_is_conditional_and_does_not_override_a_changed_private_topic(self):
+        self.record_group(text="帮我看周末天气", key="handoff-question")
+        with self.runtime.transaction() as connection:
+            self.service.record_reply(
+                connection, self.group, NOW + timedelta(seconds=1),
+                text="来私聊继续看天气", event_key="handoff-reply")
+        at = NOW + timedelta(minutes=2)
+        payload = self.service.snapshot(self.private, at, current_text="继续")
+
+        self.assertEqual(payload["continuity"]["state"], "handoff")
+        self.assertIn("只有当前消息仍明确承接 prior_question", INSTRUCTION)
+        self.assertIn("当前私聊已经建立新话题时，先回应当前话题", INSTRUCTION)
+        self.assertIn("不自动把旧群聊请求恢复成待办", INSTRUCTION)
+        self.assertNotIn("必须把 prior_question", INSTRUCTION)
 
     def test_core_reply_section_renders_only_the_private_contact_boolean_in_group(self):
         self.acquaintance.private = True
