@@ -35,6 +35,7 @@ from companion_v2.storage.runtime import StorageOpenError
 
 from .management_identity import dashboard_operator
 from .core_reply_configuration import CORE_MANAGED_FIELDS, project_core_reply_configuration
+from .model_settings import provider_output_limit_rows
 from .exchange_rate import ExchangeRateService, read_astrbot_http_proxy
 from .pricing_inventory import (
     build_pricing_payload,
@@ -742,6 +743,14 @@ class ModelWebAPI:
             if action in {"status", "configure"} and result.is_success:
                 if action == "status":
                     payload = dict(result.unwrap())
+                    settings = getattr(self.controller, "settings", None)
+                    common = getattr(settings, "common", settings)
+                    if (common is not None and isinstance(payload.get("providers"), list)):
+                        payload["providers"] = provider_output_limit_rows(
+                            payload["providers"],
+                            plugin_global=common.max_output_tokens,
+                            primary_id=common.provider_id,
+                        )
                     payload["host_route"] = self._host_route(_session)
                     payload["global_defaults"] = read_global_model_defaults(self.controller)
                     result = Outcome.success(payload)

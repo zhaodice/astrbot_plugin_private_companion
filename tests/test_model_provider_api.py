@@ -264,6 +264,22 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
                 result = await self.call(PREFIX, query=query)
                 self.assertEqual(result["message"], "model_request_invalid", result)
 
+    async def test_model_status_names_the_plugin_global_output_floor(self):
+        self.install_text_provider_catalog()
+        (await self.controller.initialize_profile()).unwrap()
+
+        result = await self.call(PREFIX)
+
+        self.assertEqual(result["status"], "ok", result)
+        providers = {item["id"]: item for item in result["data"]["providers"]}
+        primary = providers["native-model"]
+        secondary = providers["secondary-model"]
+        self.assertEqual(primary["max_output_tokens"], 8192)
+        self.assertEqual(primary["max_output_tokens_basis"], "plugin_global")
+        self.assertEqual(primary["plugin_global_max_output_tokens"], 100)
+        self.assertEqual(primary["floor_applied"], 8192)
+        self.assertEqual(secondary["max_output_tokens_basis"], "host_provider")
+
     async def test_image_provider_schema_exposes_editable_sd_sampling_fields(self):
         (await self.controller.initialize_profile()).unwrap()
         result = await self.call(PREFIX + "/image-schema")

@@ -479,7 +479,7 @@ test('a lower-capacity provider never pins an inherited default output limit', a
   node.click('[data-model-open]', {modelOpen: 'memory.reflect'});
   node.change('[data-model-field]', {modelField: 'provider', modelKind: 'memory.reflect', value: 'secondary'});
   assert.doesNotMatch(node.innerHTML, /输出上限已调整为/);
-  assert.match(node.innerHTML, /继承的默认输出上限 8192 高于所选模型提供方的 2048，发送时会按 2048 生效/);
+  assert.match(node.innerHTML, /继承的默认单次输出上限 8192 高于所选模型的单次最大输出 2048，发送时会按 2048 生效/);
   const card = node.innerHTML.split('data-fncard="memory.reflect"')[1].split('</article>')[0];
   assert.match(card, /data-field-state="max_output_tokens" data-inherited="true"/);
   assert.doesNotMatch(card, /data-model-inherit-reset="max_output_tokens"/);
@@ -515,7 +515,7 @@ test('an output limit saved upstream warns instead of being rewritten', async ()
   assert.match(card, /value="8192"/);
   node.click('[data-model-action]', {modelAction: 'save-one', modelKind: 'memory.reflect'});
   assert.equal(requests.some(request => request.method === 'POST'), false);
-  assert.match(node.innerHTML, /继承的输出上限 8192 超过所选模型提供方的 2048，请显式设置上限或改回上级/);
+  assert.match(node.innerHTML, /继承的单次输出上限 8192 超过所选模型的单次最大输出 2048，请显式设置上限或改回上级/);
 });
 
 /* 页面与路由共用同一条上限：替换规则的目标 Provider 也算在内。 */
@@ -553,14 +553,15 @@ test('a plugin-global output ceiling points the hint at the plugin setting', asy
   node.click('[data-model-sub]', {modelSub: 'cfg'});
   node.click('[data-model-open]', {modelOpen: 'memory.reflect'});
   const card = node.innerHTML.split('data-fncard="memory.reflect"')[1].split('</article>')[0];
-  assert.match(card, /输出上限 16384 超过插件全局『最大输出 Token』（当前 8192）。/);
+  assert.match(card, /单次输出上限 16384 超过插件全局『最大输出 Token』（当前 8192）。/);
   assert.match(card, /请先把「配置 → 插件 → 我会永远陪着你 → 最大输出 Token」调高，或把本任务上限调到 8192。/);
+  assert.match(card, /这是单次输出预算，不是上下文窗口。/);
   assert.doesNotMatch(card, /所选模型提供方/);
   assert.doesNotMatch(card, /该任务至少需要/);
   assert.match(card, /max="8192" step="1" data-model-field="max_output_tokens"/);
 });
 
-test('a host-provider output ceiling keeps the original wording', async () => {
+test('a host-provider output ceiling is labelled as a single-response cap', async () => {
   const {page, requests, root} = harness();
   const node = root();
   page.mount(node);
@@ -576,7 +577,7 @@ test('a host-provider output ceiling keeps the original wording', async () => {
   node.click('[data-model-sub]', {modelSub: 'cfg'});
   node.click('[data-model-open]', {modelOpen: 'memory.reflect'});
   const card = node.innerHTML.split('data-fncard="memory.reflect"')[1].split('</article>')[0];
-  assert.match(card, /输出上限 8192 超过所选模型提供方的 2048，保存会被拒绝。/);
+  assert.match(card, /单次输出上限 8192 超过所选模型的单次最大输出 2048，保存会被拒绝；这是单次输出预算，不是上下文窗口。/);
   assert.doesNotMatch(card, /插件全局/);
 });
 
@@ -3648,7 +3649,8 @@ test('a preflight save rejection is visible inside the inspector instead of behi
     assert.equal(h.requests.some(request => request.method === 'POST'), false);
     const card = node.innerHTML.split('data-fncard="memory.reflect"')[1].split('</article>')[0];
     assert.match(card, /data-model-save-feedback/);
-    assert.match(card, /输出上限 32768 超过所选模型提供方的 8192/);
+    assert.match(card, /单次输出上限 32768 超过所选模型的单次最大输出 8192/);
+    assert.match(card, /不是上下文窗口/);
   } finally {
     h.page.unmount();
   }

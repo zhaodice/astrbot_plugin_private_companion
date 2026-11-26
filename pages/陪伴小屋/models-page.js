@@ -38,7 +38,7 @@ window.CompanionModelsPage = (() => {
     model_configuration_host_managed: "普通回复模型由 AstrBot 当前会话管理；此处只保存对话附加提示。",
     configuration_revision_conflict: "配置已变化，草稿保留；核对当前值后再保存。", idempotency_key_conflict: "原保存请求与当前内容不一致，请刷新后核对。",
     model_configuration_invalid: "请核对任务配置、模型提供方和输出上限。", model_task_unavailable: "此任务已不再注册，请刷新列表。",
-    model_provider_unavailable: "所选 AstrBot 模型未加载或暂不可用于 V2。", model_capability_mismatch: "所选模型提供方不支持这项任务。", model_output_limit: "输出上限超过所选模型提供方能力。",
+    model_provider_unavailable: "所选 AstrBot 模型未加载或暂不可用于 V2。", model_capability_mismatch: "所选模型提供方不支持这项任务。", model_output_limit: "单次输出上限超过所选模型支持的最大输出（与上下文窗口无关）。",
     model_catalog_unavailable: "无法读取已加载的 AstrBot 文本模型提供方。",
     model_defaults_invalid: "陪伴通用模型参数未通过校验，请重新选择模型提供方。",
     model_defaults_unavailable: "当前环境暂不支持在此修改陪伴通用模型，请到 AstrBot 插件配置页调整。",
@@ -276,7 +276,7 @@ window.CompanionModelsPage = (() => {
   const limitIsPluginGlobal = excess => excess.owner?.max_output_tokens_basis === "plugin_global";
   const limitOrigin = excess => limitIsPluginGlobal(excess)
     ? `插件全局『最大输出 Token』（当前 ${excess.owner.plugin_global_max_output_tokens}）`
-    : `所选模型提供方的 ${excess.limit}`;
+    : `所选模型的单次最大输出 ${excess.limit}`;
   /* 全局值低于结构任务的下限时，插件按地板值上报；不解释一句，界面上的数字
      就像凭空冒出来的。 */
   const limitFloorNote = excess => limitIsPluginGlobal(excess) && excess.owner.floor_applied
@@ -303,20 +303,21 @@ window.CompanionModelsPage = (() => {
     const from = limitOrigin(excess), floor = limitFloorNote(excess);
     if (!draft.inherited.max_output_tokens)
       return limitIsPluginGlobal(excess)
-        ? sentence(`输出上限 ${excess.value} 超过${from}。`,
-          `请先把${pluginOutputSetting}调高，或把本任务上限调到 ${excess.limit}。`, floor)
-        : `输出上限 ${excess.value} 超过${from}，保存会被拒绝。`;
+        ? sentence(`单次输出上限 ${excess.value} 超过${from}。`,
+          `请先把${pluginOutputSetting}调高，或把本任务上限调到 ${excess.limit}。`,
+          "这是单次输出预算，不是上下文窗口。", floor)
+        : `单次输出上限 ${excess.value} 超过${from}，保存会被拒绝；这是单次输出预算，不是上下文窗口。`;
     return sentence(limitIsDefault(task)
-      ? `继承的默认输出上限 ${excess.value} 高于${from}，发送时会按 ${excess.limit} 生效。`
-      : `继承的输出上限 ${excess.value} 超过${from}，发出时会被拒绝；请显式设置上限或改回上级。`, floor); }
+      ? `继承的默认单次输出上限 ${excess.value} 高于${from}，发送时会按 ${excess.limit} 生效。`
+      : `继承的单次输出上限 ${excess.value} 超过${from}，发出时会被拒绝；请显式设置上限或改回上级。`, floor); }
   function limitProblem(s, task, draft) { const excess = limitExcess(s, task, draft); if (!excess) return "";
     const from = limitOrigin(excess);
     if (!draft.inherited.max_output_tokens)
       return limitIsPluginGlobal(excess)
-        ? `输出上限 ${excess.value} 超过${from}，请先调高插件全局设置或把本任务上限调到 ${excess.limit}`
-        : `输出上限 ${excess.value} 超过${from}，请调低后再保存`;
+        ? `单次输出上限 ${excess.value} 超过${from}，请先调高插件全局设置或把本任务上限调到 ${excess.limit}`
+        : `单次输出上限 ${excess.value} 超过${from}，请调低后再保存`;
     return limitIsDefault(task) ? ""
-      : `继承的输出上限 ${excess.value} 超过${from}，请显式设置上限或改回上级`; }
+      : `继承的单次输出上限 ${excess.value} 超过${from}，请显式设置上限或改回上级`; }
   const rowFallback = (task, draft) => {
     if (coreReply(task)) return "";
     if (draft && (!draft.inherited.fallback || draft.touched)) return effective(task, draft, "fallback");

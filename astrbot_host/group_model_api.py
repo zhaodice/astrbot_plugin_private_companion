@@ -25,6 +25,7 @@ from .model_api import (
     read_global_model_defaults,
     save_global_model_defaults,
 )
+from .model_settings import provider_output_limit_rows
 from .settings import HostControlError
 from .web_api import outcome_response
 
@@ -218,6 +219,14 @@ class GroupModelWebAPI:
             async with self.controller._control_lock:
                 operator, manager, _ = await self._prepare(layer)
                 result = require(manager.status(operator, layer=layer))
+                settings = self.controller.settings
+                common = getattr(settings, "common", settings)
+                if common is not None:
+                    result["providers"] = provider_output_limit_rows(
+                        result.get("providers", []),
+                        plugin_global=common.max_output_tokens,
+                        primary_id=common.provider_id,
+                    )
                 result["scope_kind"] = "group"
                 result["global_defaults"] = read_global_model_defaults(self.controller)
                 return outcome_response(Outcome.success(result))
