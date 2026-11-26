@@ -29,7 +29,8 @@ from companion_v2.execution.runner import RunResult
 from companion_v2.expression.learning import mode_instruction, signal_limit
 from companion_v2.expression.style_management import ExpressionStyleManagement
 from companion_v2.expression.style_service import (CURSOR_PREFIX, KIND, OUTCOME_PREFIX,
-                                                    ExpressionStyleService, reduced_signal_limit)
+                                                    ExpressionStyleService, LEARNING_SIGNAL_LIMIT,
+                                                    reduced_signal_limit)
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind, ScopeRef
 from companion_v2.model_gateway.models import (Amount, CapturedModelOutput, LocalProvider,
@@ -143,9 +144,11 @@ class ExpressionLearningTruncationTests(ExpressionFixture, HostFixture, unittest
         requests = self.learning_requests()
         self.assertEqual(len(requests), 2, "a truncated round retries exactly once")
         first, retry = requests
-        first_limit = signal_limit("balanced", LEARNING_TOKENS)
+        first_limit = min(signal_limit("balanced", LEARNING_TOKENS), LEARNING_SIGNAL_LIMIT)
         retry_limit = reduced_signal_limit(first_limit)
-        self.assertGreater(first_limit, 1, "the fixture profile leaves a smaller ask to retry with")
+        self.assertEqual(first_limit, LEARNING_SIGNAL_LIMIT,
+                         "both manual and automatic learning start with the small ask")
+        self.assertGreater(first_limit, 1, "the small ask leaves a smaller retry")
         self.assertIn("降低产出条数后重试", "\n".join(logs.output),
                       "the log says the batch was retried with a reduced ask, not after a lease")
         self.assertIn(f"limit={first_limit}→{retry_limit}", "\n".join(logs.output))
@@ -291,12 +294,16 @@ class GroupLearningTruncationTests(SkipNoteFixture, unittest.IsolatedAsyncioTest
         self.model_calls.append(task_id)
         # ``generate`` records the ask it used on this attempt's pending job; the
         # scripted round supplies it so ``run`` derives the retry's smaller ask.
-        self.service_ref.pending[task_id]["learn_limit"] = 6
+        pending = self.service_ref.pending[task_id]
+        if pending.get("learn_limit") is None:
+            pending["learn_limit"] = LEARNING_SIGNAL_LIMIT
         if self.rounds.pop(0) == "truncated":
             return Outcome.success(RunResult(SimpleNamespace(state="failed", reason="worker_error"),
                                              "model_output_truncated"))
         self.operations.transition(task_id, expected_state=OperationState.ACCEPTED,
                                    next_state=OperationState.COMPLETED, observed_at=self.now).unwrap()
+        with self.runtime.transaction() as connection:
+            self.service_ref._commit_group_batch(connection, context, self.now, GROUP_INPUT_SEQUENCE)
         return Outcome.success(RunResult(SimpleNamespace(state="succeeded", reason="owner_result")))
 
     def assert_batch_reserved_once(self, service, context):
@@ -316,7 +323,8 @@ class GroupLearningTruncationTests(SkipNoteFixture, unittest.IsolatedAsyncioTest
         self.assertNotEqual(report.get("code"), "expression_group_budget_exhausted",
                             "the retry must reach the model instead of its own budget gate")
         self.assertEqual(len(self.model_calls), 2, "a group batch retries once with a smaller ask")
-        self.assertEqual(report["truncation_retry"], {"limit": 6, "retry_limit": 1})
+        self.assertEqual(report["truncation_retry"],
+                         {"limit": LEARNING_SIGNAL_LIMIT, "retry_limit": 1})
         self.assert_batch_reserved_once(service, context)
 
     async def test_a_group_round_truncated_twice_fails_without_a_third_call(self):
@@ -327,7 +335,11 @@ class GroupLearningTruncationTests(SkipNoteFixture, unittest.IsolatedAsyncioTest
         self.assertEqual(report["state"], "failed", report)
         self.assertEqual(report["code"], "model_output_truncated")
         self.assertEqual(len(self.model_calls), 2, "bounded retry: never a third group call")
-        self.assert_batch_reserved_once(service, context)
+        self.assertEqual(service._global_group_batches(service._day(self.now)), 0,
+                         "two failed attempts commit no daily group batch")
+        progress = service._progress(context)
+        self.assertEqual(progress["batches"], 0)
+        self.assertEqual(progress["input_sequence"], 0)
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ const sample = (handle, text, index = 0) => ({handle, text, sender_id: "member-a
 const runtimeOf = (changes = {}) => ({last_result: null, running: false, learning_enabled: true,
   application_enabled: true, minimum_samples: 8, eligible_samples: 1, new_messages: 3,
   required_new_messages: 2, group_batches_today: 1, group_daily_batch_limit: 4,
-  sample_review_auto_after: 0, ...changes});
+  sample_review_auto_after: 0, learning_signal_limit: 2, ...changes});
 
 const readable = items => ({status: "ok", data: {items, counts: {pending: items.length, approved: 0, rejected: 0},
   sample_review_enabled: false, next_cursor: null, runtime: runtimeOf()}});
@@ -202,6 +202,7 @@ test("自动审核开启后显示当前来源的待审数量和阈值", async ()
     [sourceOf("source-a", "来源甲", "a")]);
   assert.equal(samples.state.runtime.sample_review_auto_after, 6);
   assert.match(root.innerHTML, /待审满 6 条自动审核/);
+  assert.match(root.innerHTML, /每次最多 2 条候选/);
   assert.match(root.innerHTML, /当前来源待审 2 \/ 6 条/);
   samples.unmount();
 });
