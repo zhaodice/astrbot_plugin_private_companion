@@ -76,6 +76,19 @@ window.CompanionReplyPage = (() => {
       group_wakeup_bot_name: "角色在群里的名称",
       group_wakeup_primary_member_ids: "主要成员账号 ID",
       group_wakeup_owner_direct_words: "主要成员专属直呼词",
+      group_familiarity_enabled: "允许熟人/熟群消息进入 Laya 判断",
+      group_familiarity_speaker_enabled: "当前发言者达到活跃阈值",
+      group_familiarity_mention_enabled: "提到已观察到的熟成员",
+      group_familiarity_group_enabled: "熟群消息可进入判断",
+      group_familiarity_min_messages: "成员熟悉消息数",
+      group_familiarity_min_active_days: "成员熟悉活跃天数",
+      group_familiarity_group_min_messages: "熟群消息数",
+      group_familiarity_group_min_members: "熟群观察成员数",
+      group_familiarity_probability: "熟悉候选抽样概率",
+      group_familiarity_cooldown_seconds: "熟悉候选冷却（秒）",
+      role_global_memory_enabled: "启用 Bot 角色全局记忆",
+      group_autonomous_interests_enabled: "允许 Bot 自主维护群聊兴趣",
+      mcp_disabled_tools: "允许 Bot 调用的工具",
       group_wakeup_interest_probability: "兴趣候选抽取概率",
       group_wakeup_question_threshold: "问题与求助阈值",
       group_wakeup_cold_group_enabled: "启用冷群重启判断",
@@ -99,6 +112,7 @@ window.CompanionReplyPage = (() => {
       private_closing_guard_window_seconds: "收尾判断窗口（秒）",
       private_closing_guard_prompt_enabled: "同时提示模型自然收尾",
       private_debounce_enabled: "启用私聊连续输入防抖",
+      private_debounce_semantic_enabled: "使用本地模型判断是否说完",
       private_debounce_min_ms: "最短静默（毫秒）",
       private_debounce_max_ms: "最长静默（毫秒）",
       private_debounce_total_ms: "单轮总上限（毫秒）",
@@ -153,7 +167,7 @@ window.CompanionReplyPage = (() => {
       reply_mention_speaker_enabled: "群聊回复时 @ 发言者",
       voice_enabled: "启用语音", voice_trigger_mode: "触发方式", voice_generation_mode: "朗读内容",
       voice_conversion_scope: "语音转换范围",
-      voice_segment_mode: "朗读段落（整段会等文字收齐后合成一次）", voice_delivery_mode: "发送形式", voice_position: "语音位置",
+      voice_segment_mode: "朗读段落", voice_delivery_mode: "发送形式", voice_position: "语音位置",
       voice_language: "语音语言", voice_foreign_text_mode: "外语文字",
       voice_direction_mode: "表演指令 / 风格强化",
       voice_provider_id: "通用 TTS 扩展", voice_zh_provider_id: "中文 TTS 扩展",
@@ -209,7 +223,7 @@ window.CompanionReplyPage = (() => {
       reply_quote_skip_chars: "回复去空白后不超过此字数时不附引用；0 表示不跳过。",
       reply_mention_speaker_enabled: "只在群聊中 @ 本轮发言者。",
       voice_trigger_mode: "决定这一轮要不要朗读，以及由谁挑句子。",
-      voice_segment_mode: "整段语气更完整；逐段出音更早。",
+      voice_segment_mode: "整段会等文字收齐后合成一次，语气更完整；逐段出音更早。",
       voice_delivery_mode: "仅语音只在完整覆盖文字时替代文字。",
       voice_language: "本窗口默认朗读语种；当轮换语种不保存。",
       voice_probability: "按百分比编辑，后端按 0–1 的小数保存。",
@@ -244,8 +258,21 @@ window.CompanionReplyPage = (() => {
       group_wakeup_question_enabled: "默认关闭；明确开启后，未点名的实质问题或求助才可进入答疑候选。问号、反问和吐槽不自动唤醒。设置跟随角色，同一角色的群窗口共用。",
       group_wakeup_bot_name_enabled: "开启后，角色名称会并入直呼词。",
       group_wakeup_bot_name: "填写角色在群聊中使用的名称；同一角色的群聊共用，最多 40 字。",
-      group_wakeup_primary_member_ids: "只接受平台账号数字 ID；同一角色的群聊共用这份主要成员名单。",
+      group_wakeup_primary_member_ids: "只接受平台账号数字 ID；同一角色的群聊共用这份主要成员名单。Laya 的熟人候选会把名单中的当前发言者或唯一提到的成员视为明确熟人。",
       group_wakeup_owner_direct_words: "只对上方主要成员账号生效。",
+      group_familiarity_enabled: "仅在 Laya 已启用且「判断是否回复」也开启时生效。插件只保存本群观察到的消息数、活跃天数、平台昵称/群名片和事件去重记录，不保存群消息正文；主要成员名单中的账号直接视为熟成员，其余熟悉度是本群活跃代理，不代表现实亲密关系。",
+      group_familiarity_speaker_enabled: "当前发言者属于主要成员名单，或在本群累计达到下方消息数和活跃天数后，可成为 Laya 的接话候选。",
+      group_familiarity_mention_enabled: "文本唯一提到主要成员或达到阈值的已观察成员时，可成为候选。同名成员或短名称只是另一个更长名称的一部分时不会触发，避免把提及认错人。",
+      group_familiarity_group_enabled: "群聊累计达到下方消息数和观察成员数后，普通群消息也可成为 Laya 的接话候选。",
+      group_familiarity_min_messages: "成员至少在本群被观察到多少条消息；默认 6 条。阈值越高，熟人判断越保守。",
+      group_familiarity_min_active_days: "成员至少在本群多少个不同日期发言；默认 2 天，避免一次集中聊天就被当成长期熟悉。",
+      group_familiarity_group_min_messages: "熟群至少累计多少条观察消息；默认 20 条。",
+      group_familiarity_group_min_members: "熟群至少观察到多少名发言成员；默认 3 人。",
+      group_familiarity_probability: "达到熟人/熟群阈值后，按此概率进入 Laya 判断；候选不是必答，Laya 仍会结合话题、人设、记忆线索、状态与当前意愿选择接话或沉默。0 表示不抽样。",
+      group_familiarity_cooldown_seconds: "两次熟悉候选之间的最短间隔，避免熟人连续发言时每次都唤醒 Laya；0 表示不等待。",
+      role_global_memory_enabled: "记忆归属当前 Bot 角色，而不是当前用户、好友或会话。陌生人第一次私聊也会进入同一个角色记忆池；可跨群和私聊检索，用来回答“今天有什么好玩的事”“其他群聊了什么”。当前私聊可读原文；群公开消息可跨群读取原文；Bot 在其他私聊中的自己发言可读取；其他用户的私聊原话只提供交流事实、时间、来源与参与者。该开关按角色生效，回合开始后保持本轮快照。",
+      group_autonomous_interests_enabled: "允许 Bot 根据看到的上下文、自身人设、群公共记忆和角色全局记忆，自行创建、修订或软撤回群聊兴趣；无需管理员逐条维护关键词。兴趣只扩大 Laya 的候选机会，是否接话仍由模型结合语境与当前意愿判断。自主兴趣属于当前 Bot 角色并跨群共享。",
+      mcp_disabled_tools: "这里按允许使用勾选。取消勾选即把工具加入角色级禁用清单，同时覆盖 Companion、Relay、AstrBot 原生工具与 MCP；目录里暂时消失的旧禁用项会继续保留，避免刷新后被意外重新启用。工具目录只显示脱敏后的名称与说明。",
       group_wakeup_interest_probability: "命中兴趣关键词后，按此概率进入模型参与判断；未抽中时不为该线索调用模型。0 表示关闭，1 表示全部进入，进入后仍可旁听。",
       group_tool_profile: "完整保留可用工具；常用只挂群聊常用能力；精简会移除其他插件提供的工具，包括外部记忆与搜索。选择精简可减少工具开销，也会减少模型可调用的能力。",
       private_tool_profile: "控制私聊中挂载的陪伴工具范围（跟随角色默认，支持单窗口覆盖），始终保留你在 AstrBot 人格卡中配置的其他插件工具。完整保留全部可用陪伴工具；精简仅保留待办、日程、记忆与日常互动；按组自选可自由勾选功能组；关闭陪伴工具将不注入本插件工具。工具清单整轮固定，不影响前缀缓存。",
@@ -272,6 +299,7 @@ window.CompanionReplyPage = (() => {
       private_closing_guard_window_seconds: "只在这个时间窗口内判断收尾；超过窗口后仍按普通消息回复。范围 60–7200 秒。",
       private_closing_guard_prompt_enabled: "未触发静默时，把收尾语境作为本轮提示，提醒模型不要另起话题、追问或再补一条同义道别。",
       private_debounce_enabled: "仅纯文本私聊生效：第一条消息立即开始准备，短线补充并入同一轮，只触发一次模型请求。图片、语音、视频、文件、引用和命令立即处理。",
+      private_debounce_semantic_enabled: "需要在 AstrBot 插件配置中设置本地 ONNX 模型目录。等待补话仍受单轮总上限限制。",
       private_debounce_min_ms: "长消息靠近这个下限；与最长静默相同时使用固定等待，推荐从 1500 毫秒起调整。",
       private_debounce_max_ms: "短消息靠近这个上限；实际窗口还受单轮总上限约束，默认 4000 毫秒。",
       private_debounce_total_ms: "从第一条消息开始计算，达到该时间后不再等待新消息；默认 8000 毫秒，不能小于最长静默。",
@@ -343,6 +371,12 @@ window.CompanionReplyPage = (() => {
       {id: "wakeup_members", title: "直呼与成员", help: "",
        fields: ["group_wakeup_bot_name_enabled", "group_wakeup_bot_name",
                 "group_wakeup_primary_member_ids", "group_wakeup_owner_direct_words"]},
+      {id: "wakeup_familiarity", title: "熟人、熟群候选", help: "只在 Laya 启用且「判断是否回复」开启时收集和使用。主要成员直接视为熟人；其余熟悉度来自本群观察统计，不是现实亲密关系。候选也不是必答邀请，Laya 可结合人设、群记忆、状态和当前意愿选择沉默。",
+       fields: ["group_familiarity_enabled", "group_familiarity_speaker_enabled",
+                "group_familiarity_mention_enabled", "group_familiarity_group_enabled",
+                "group_familiarity_min_messages", "group_familiarity_min_active_days",
+                "group_familiarity_group_min_messages", "group_familiarity_group_min_members",
+                "group_familiarity_probability", "group_familiarity_cooldown_seconds"]},
       {id: "wakeup_cold_group", title: "冷场与等待", help: "",
        fields: ["group_wakeup_cold_group_enabled", "group_wakeup_cold_group_threshold",
                 "group_wakeup_cold_group_idle_minutes", "group_wakeup_short_text_wait_ms"]},
@@ -356,7 +390,7 @@ window.CompanionReplyPage = (() => {
                 "group_conversation_followup_max_turns"]},
       {id: "private_debounce", title: "私聊节奏 · 连续输入", help: "第一条消息到达即开始准备，后续文本并入同一轮；总等待不超过配置上限。",
        fields: ["private_debounce_enabled", "private_debounce_min_ms", "private_debounce_max_ms",
-                "private_debounce_total_ms"]},
+                "private_debounce_total_ms", "private_debounce_semantic_enabled"]},
       {id: "silence_policy", title: "沉默策略", help: "统一管理哪些情况允许自动沉默；具体窗口与阈值仍在下方各分区调整。忙碌与休息闸门使用下方独立设置，它们只延期、不取消。Laya 的 wait/silent 与未点名群聊旁听仍由决策和群聊参与设置控制。",
        fields: ["recall_silence_enabled", "private_closing_guard_enabled", "group_air_guard_enabled"]},
       {id: "group_air_guard", title: "空气护栏 · 细则", help: "",
@@ -368,6 +402,10 @@ window.CompanionReplyPage = (() => {
       {id: "group_content_safety", title: "内容护栏 · 挡说错话", help: "",
        fields: ["enable_group_injection_guard", "enable_group_privacy_guard",
                 "enable_group_reality_promise_guard"]},
+      {id: "memory_tools", title: "Bot 全局记忆与工具",
+       help: "全局记忆属于当前 Bot 角色，陌生人和每个群聊都进入同一记忆池；跨私聊检索时只公开允许给当前对象的内容。工具清单统一控制 Companion、Relay、AstrBot 原生与 MCP，取消勾选即禁用。",
+       fields: ["role_global_memory_enabled", "group_autonomous_interests_enabled",
+                "mcp_disabled_tools"]},
       {id: "media_permissions", title: "角色级理解许可", help: "",
        fields: ["image_understanding_private_enabled", "image_understanding_group_enabled",
                 "video_understanding_private_enabled", "video_understanding_group_enabled",
@@ -430,6 +468,10 @@ window.CompanionReplyPage = (() => {
       group_wakeup_interest_keywords: "word-list", group_wakeup_primary_member_ids: "word-list",
       group_wakeup_owner_direct_words: "word-list",
       file_understanding_format_groups: "word-list",
+      mcp_disabled_tools: "tool-checklist",
+    },
+    catalogs: {
+      mcp_disabled_tools: status => Array.isArray(status?.tools) ? status.tools : [],
     },
     chipOptions: {
       content_cleanup_scope: {mode: "multi", options: ["leading", "middle", "trailing"],
@@ -458,6 +500,7 @@ window.CompanionReplyPage = (() => {
       private_closing_guard_window_seconds: {private_closing_guard_enabled: true},
       private_closing_guard_prompt_enabled: {private_closing_guard_enabled: true},
       private_debounce_min_ms: {private_debounce_enabled: true},
+      private_debounce_semantic_enabled: {private_debounce_enabled: true},
       private_debounce_max_ms: {private_debounce_enabled: true},
       private_debounce_total_ms: {private_debounce_enabled: true},
     },
@@ -482,13 +525,14 @@ window.CompanionReplyPage = (() => {
       voice_primary_mention_prompt: 3,
       private_image_self_recognition_hint: 3, video_self_recognition_hint: 3},
   };
-  const decisionSectionIds = new Set(["wakeup_direct", "wakeup_interest", "wakeup_members",
-    "wakeup_cold_group", "wakeup_fatigue", "group_continuation", "private_debounce",
-    "silence_policy", "group_air_guard", "private_closing", "group_content_safety"]);
+  const decisionSectionIds = new Set(["wakeup_direct", "wakeup_interest", "wakeup_members", "wakeup_familiarity",
+      "wakeup_cold_group", "wakeup_fatigue", "group_continuation", "private_debounce",
+      "silence_policy", "group_air_guard", "private_closing", "group_content_safety", "memory_tools"]);
   const decisionViewSections = {
-    response: ["wakeup_direct", "wakeup_interest", "wakeup_members"],
+    response: ["wakeup_direct", "wakeup_interest", "wakeup_members", "wakeup_familiarity"],
     tempo: ["group_continuation", "private_debounce", "wakeup_cold_group", "wakeup_fatigue"],
     safety: ["silence_policy", "group_air_guard", "private_closing", "group_content_safety"],
+    tools: ["memory_tools"],
   };
   const decisionSectionViews = Object.fromEntries(Object.entries(decisionViewSections)
     .flatMap(([view, sections]) => sections.map(section => [section, view])));
@@ -1530,11 +1574,31 @@ window.CompanionReplyPage = (() => {
     return true;
   }
 
+  function perceptionScopeNote(module) {
+    if (module === "forwards") {
+      return "<strong>改写范围与继承说明</strong>"
+        + "<p>控制当前窗口是否展开合并转发的节点内容、媒体与阅读提示；留空时继承角色默认。单条消息转发数、节点上限与嵌套深度由下方全局解析上限统一管控。</p>";
+    }
+    if (module === "image") {
+      return "<strong>普通聊天的图片由 AstrBot 核心管线送入本轮请求</strong>"
+        + "<p>此处配置视觉转述缓存、识图失败冷却与上下文图片描述条数，用于提升重复图片与连续看图体验；场景级开关在「总览 → 适用范围」中管理。</p>";
+    }
+    if (module === "file") {
+      return "<strong>文件理解按格式白名单与体积上限解析</strong>"
+        + "<p>可选择纳入解析的文件格式并设置单文件大小、正文长度与读取超时；未安装的格式解析器会自动跳过，不会阻塞普通文字回复。</p>";
+    }
+    return "<strong>普通聊天的视频已由本插件原生理解</strong>"
+      + "<p>普通聊天的图片、视频和文件由 AstrBot 核心管线送入本轮请求。视频默认开启：支持视频输入的 Gemini 类模型直接读取整段原视频；其他模型用宿主自带的 ffmpeg 抽帧后作为图片送入同一轮请求，不依赖外部视频插件。超时或抽帧失败时本轮不带视频继续，不会阻塞文字回复。本页的转述和文件读取设置用于 V2 独立任务及历史兼容。</p>";
+  }
+
   function setPerceptionModule(module) {
     if (!root || !instance || root.dataset?.replyView !== "perception") return false;
-    const sections = perceptionModuleSections[module] || perceptionModuleSections.overview;
+    const resolved = module in perceptionModuleSections ? module : "overview";
+    const sections = perceptionModuleSections[resolved] || perceptionModuleSections.overview;
     instance.setVisibleGroups?.(sections, sections[0] || "");
-    root.dataset.perceptionModule = module in perceptionModuleSections ? module : "overview";
+    root.dataset.perceptionModule = resolved;
+    const scope = root.querySelector?.('[data-reply-part="scope"]');
+    if (scope) scope.innerHTML = perceptionScopeNote(resolved);
     return true;
   }
 
@@ -1608,9 +1672,9 @@ window.CompanionReplyPage = (() => {
     const diagnostics = [undefined, "decision"].includes(options.view)
       ? '<div data-reply-part="diagnostics"></div>' : "";
     const scopeNote = options.view === "decision"
-      ? '<aside class="reply-scope-note" role="note"><strong>基础唤醒后才进行决策</strong><p>答疑默认关闭，弱相关词默认留空。角色默认供各群继承；选中具体群时编辑本群覆盖，已单独设置的群字段不随角色默认改变。明确 @、引用或直接呼唤优先，其他候选由 Laya 结合有效开关与近期群历史判断是否旁听。私聊收尾沉默只处理纯道别、致谢或简短应声，且角色上一轮已经收尾；带问题、请求、图片或新内容的消息不受影响。私聊纯文本防抖与合并总窗口在「参与节奏 → 私聊节奏 · 连续输入」中配置；图片、语音、视频、文件、引用和命令不参与合并。</p></aside>' : options.view === "perception"
-      ? '<aside class="reply-scope-note" role="note"><strong>普通聊天的视频已由本插件原生理解</strong>' +
-        '<p>普通聊天的图片、视频和文件由 AstrBot 核心管线送入本轮请求。视频默认开启：支持视频输入的 Gemini 类模型直接读取整段原视频；其他模型用宿主自带的 ffmpeg 抽帧后作为图片送入同一轮请求，不依赖外部视频插件。超时或抽帧失败时本轮不带视频继续，不会阻塞文字回复。本页的转述和文件读取设置用于 V2 独立任务及历史兼容。</p></aside>'
+      ? '<aside class="reply-scope-note" role="note"><strong>先收集候选，再由 Laya 决定是否接话</strong><p>答疑默认关闭，弱相关词默认留空。角色默认供各群继承；选中具体群时编辑本群覆盖，已单独设置的群字段不随角色默认改变。明确 @、引用或直接呼唤优先。只有在 Laya 已启用且「判断是否回复」开启时，熟人发言、熟人提及和熟群消息才可成为候选；Laya 会结合话题、人设、记忆线索、状态与当前意愿决定接话或沉默，不要求逐句回应。私聊收尾沉默只处理纯道别、致谢或简短应声，且角色上一轮已经收尾；带问题、请求、图片或新内容的消息不受影响。私聊纯文本防抖与合并总窗口在「参与节奏 → 私聊节奏 · 连续输入」中配置；图片、语音、视频、文件、引用和命令不参与合并。</p></aside>'
+      : options.view === "perception"
+      ? `<aside class="reply-scope-note" role="note" data-reply-part="scope">${perceptionScopeNote(options.perceptionModule || "overview")}</aside>`
       : '<aside class="reply-scope-note" role="note" data-reply-part="scope">' +
         expressionScopeNote(options.expressionModule) + '</aside>';
     root.innerHTML = scopeNote + '<div data-reply-part="settings"></div>'
@@ -1643,6 +1707,7 @@ window.CompanionReplyPage = (() => {
       normalizeDraft: normalizeReplyDraft,
       /* TTS 扩展目录要等读取之后才知道，所以选项由函数现取。 */
       catalogs: {
+        ...spec.catalogs,
         voice_provider_id: () => providerOptions("跟随 AstrBot"),
         voice_zh_provider_id: () => providerOptions("使用通用扩展"),
         voice_ja_provider_id: () => providerOptions("使用通用扩展"),
@@ -1692,10 +1757,3 @@ window.CompanionReplyPage = (() => {
     get state() { return {instance, example: state.example, imageCount: state.imageCount,
       status: state.status, preview: state.preview, notice: state.notice, bad: state.bad}; }};
 })();
-
-
-
-
-
-
-

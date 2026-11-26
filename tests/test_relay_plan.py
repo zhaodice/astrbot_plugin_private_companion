@@ -46,6 +46,21 @@ class RelayPlanTests(unittest.TestCase):
         self.assertEqual(plan.audit["audience"], "admin_group")
         self.assertEqual(plan.audit["destination_kind"], "group")
 
+    def test_core_admin_plan_can_use_an_explicit_arbitrary_target(self):
+        settings = dict(
+            SETTINGS,
+            allowed_targets=[],
+            allowed_groups=[],
+            allow_arbitrary_targets=True,
+        )
+        plan = plan_relay(
+            ask("9999"), settings, actor_is_core=True, actor_id="1001"
+        )
+
+        self.assertTrue(plan.allowed)
+        self.assertTrue(plan.needs_confirm)
+        self.assertTrue(plan.audit["allow_arbitrary_targets"])
+
     def test_disabled_window_yields_no_destination(self):
         plan = plan_relay(ask(), {"enabled": False}, actor_is_core=True)
         self.assertFalse(plan.allowed)

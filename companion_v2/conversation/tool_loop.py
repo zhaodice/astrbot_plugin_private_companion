@@ -26,6 +26,12 @@ from .agenda_tools import AgendaRoleSession, AgendaToolResult, CONTINUATION_INST
 from .foreground import PromptMaterial
 from .media.generated import GROUP_IMAGE_ACTIONS
 from .messages import REPLY_KIND, source_from_document
+from .tool_controls import (
+    disabled_tool_set,
+    filter_specs,
+    is_tool_disabled,
+    require_tool_enabled,
+)
 
 
 READ_ACTIONS = frozenset({"memo.read", "memo.list", "reminder.read", "reminder.list", "operation.lookup"})
@@ -170,12 +176,21 @@ class LocalRoleTools:
         # 坏、下一轮好），冻在构造里会让让位状态一直卡到进程重启。这里只装配工具
         # 所有者的身份，能不能给模型看由 ``_catalog_for`` 每轮判定。
         self.memory = MemoryTools(memory, messages) if memory is not None else None
+        from companion_v2.memory.role_global import RoleGlobalMemory, RoleGlobalMemoryTools
+        self.role_global = RoleGlobalMemoryTools(RoleGlobalMemory(messages))
         from companion_v2.memory.group.tools import GroupMemoryTools
         self.group_memory = GroupMemoryTools(messages.group_memory, memory)
         from companion_v2.memory.person.tools import PersonAcquaintanceTools
         self.acquaintance = PersonAcquaintanceTools(messages.acquaintance)
         from .participation import GroupParticipation
         self.group_participation = GroupParticipation(messages)
+        from .group_interests import (
+            GroupAutonomousInterests,
+            GroupAutonomousInterestTools,
+        )
+        self.group_interests = GroupAutonomousInterests(messages)
+        self.group_interest_tools = GroupAutonomousInterestTools(
+            self.group_interests)
         from companion_v2.relationships.tools import RelationshipTools
         self.relationships = RelationshipTools(relationships, messages) if relationships is not None else None
         from companion_v2.role_work.growth.tools import RoleGrowthTools
@@ -229,8 +244,10 @@ class LocalRoleTools:
         self.actions |= self.weather.actions
         self.actions |= self.web.actions
         self.actions |= self.group_memory.actions
+        self.actions |= self.role_global.actions
         self.actions |= self.acquaintance.actions
         self.actions |= self.group_participation.actions
+        self.actions |= self.group_interest_tools.actions
         if external is not None:
             if self.actions & external.actions:
                 raise ValueError("extension actions cannot replace built-in tool owners")
@@ -244,6 +261,7 @@ class LocalRoleTools:
         # registry, so an unused extension cannot prevent host startup.
         with self.runtime.read_snapshot():
             catalog = self._catalog_for(context, batch_id)
+            catalog = self._apply_tool_controls(catalog, batch_id)
         self._validate_catalog_budget(catalog)
         return catalog
 
@@ -255,14 +273,18 @@ class LocalRoleTools:
                 "reduce concurrently enabled tool capabilities for this conversation before retrying; "
                 "no tools were dispatched or silently omitted")
 
-    def catalog_diagnostics(self, context, offered, external_filter_reasons=None):
+    def catalog_diagnostics(self, context, offered, external_filter_reasons=None,
+                            disabled=None):
         """Summarize registered actions omitted from this exact model catalog."""
         offered_actions = {tool.action for tool in offered}
         external_filter_reasons = external_filter_reasons or {}
+        disabled = disabled or ()
         withheld = []
         for action in sorted(self.actions - offered_actions):
             reason = "owner_scope_or_authorization_unavailable"
-            if context.scope.kind is ScopeKind.GROUP:
+            if is_tool_disabled(disabled, action=action):
+                reason = "tool_disabled_by_config"
+            elif context.scope.kind is ScopeKind.GROUP:
                 if self.external is not None and action in self.external.actions and action not in GROUP_EXTERNAL_ACTIONS:
                     reason = "not_supported_for_group"
                 elif self.semantic is not None and action in self.semantic.actions:
@@ -277,6 +299,10 @@ class LocalRoleTools:
                         reason = error.code
                 elif action in self.acquaintance.actions:
                     reason = "acquaintance_unavailable_or_not_authorized"
+                elif action in self.group_interest_tools.actions:
+                    reason = "group_autonomous_interests_disabled_or_unavailable"
+                elif action in self.role_global.actions:
+                    reason = "role_global_memory_disabled"
                 elif self.external is not None and action in self.external.actions:
                     reason = external_filter_reasons.get(action, "extension_unavailable_or_not_authorized")
             elif self.semantic is not None and action in self.semantic.actions:
@@ -298,9 +324,45 @@ class LocalRoleTools:
         external_filter_reasons = {}
         with self.runtime.read_snapshot():
             offered = self._catalog_for(context, batch_id, external_filter_reasons)
+            disabled = self._disabled_tools(batch_id)
+            offered = (filter_specs(
+                offered, disabled, action_getter=lambda tool: tool.action)
+                if disabled else offered)
             self._validate_catalog_budget(offered)
-            filters = self.catalog_diagnostics(context, offered, external_filter_reasons)
+            filters = self.catalog_diagnostics(
+                context, offered, external_filter_reasons, disabled=disabled)
         return offered, filters
+
+    def _disabled_tools(self, batch_id=None):
+        if batch_id is None:
+            return ()
+        try:
+            batch = self.messages.batch(batch_id)
+            saved = json.loads(batch["contributions_json"])
+            snapshot = saved.get("reply_settings") if isinstance(saved, dict) else None
+            settings = snapshot.get("settings") if isinstance(snapshot, dict) else None
+            raw = settings.get("mcp_disabled_tools", "[]") if isinstance(settings, dict) else "[]"
+            return disabled_tool_set(raw, strict=False)
+        except Exception:
+            return ()
+
+    def _settings_values(self, batch_id=None):
+        if batch_id is None:
+            return {}
+        try:
+            batch = self.messages.batch(batch_id)
+            saved = json.loads(batch["contributions_json"])
+            snapshot = saved.get("reply_settings") if isinstance(saved, dict) else None
+            settings = snapshot.get("settings") if isinstance(snapshot, dict) else None
+            return settings if isinstance(settings, dict) else {}
+        except Exception:
+            return {}
+
+    def _apply_tool_controls(self, catalog, batch_id=None):
+        disabled = self._disabled_tools(batch_id)
+        if not disabled:
+            return catalog
+        return filter_specs(catalog, disabled, action_getter=lambda tool: tool.action)
 
     def _memory_is_external(self) -> bool:
         """这段时期 ``memory.*`` 是否已经交给别家插件对外提供。
@@ -318,6 +380,7 @@ class LocalRoleTools:
 
     def _catalog_for(self, context, batch_id=None, external_filter_reasons=None):
         semantic = self.semantic.catalog_for(context, batch_id) if self.semantic is not None else ()
+        settings = self._settings_values(batch_id)
         if context.scope.kind is ScopeKind.GROUP:
             try:
                 self.messages.group_context.authorize(context, self.tasks.now())
@@ -344,6 +407,9 @@ class LocalRoleTools:
                     if external_filter_reasons is not None:
                         external_filter_reasons.update({action: denial[0] for action in image_actions})
             return semantic + self.acquaintance.catalog_for(context) + self.group_participation.catalog_for(context) \
+                + self.group_interest_tools.catalog_for(
+                    context, settings) \
+                + self.role_global.catalog_for(context, settings) \
                 + self.group_memory.catalog_for(context) + self.web.catalog_for(context) + tuple(
                 tool for tool in external if tool.action in allowed_external_actions)
         # 唯一决定「模型这一轮看到哪些工具」的地方，所以记忆让位的门也设在这里：
@@ -377,6 +443,7 @@ class LocalRoleTools:
                      if self.authoring is not None else ())
         return (semantic + base
                 + self.acquaintance.catalog_for(context)
+                + self.role_global.catalog_for(context, settings)
                 + (memory.catalog_for(context) if memory else ())
                 + (self.growth.catalog_for(context) if self.growth else ())
                 + (self.timeline.catalog_for(context) if self.timeline else ())
@@ -528,12 +595,21 @@ class LocalRoleTools:
     def _validate_result(self, row, request, context, at):
         if self.semantic is not None and row["action"] in self.semantic.actions:
             return self.semantic.validate(row, context, self._visible(row))
+        if row["action"] in self.role_global.actions:
+            result = self._visible(row)
+            if row["state"] == "succeeded":
+                self.role_global.memory.validate_result(
+                    context, result.get("payload"),
+                    self._settings_values(row["batch_id"]))
+            return result, None
         if context.scope.kind is ScopeKind.GROUP:
             self.messages.group_context.authorize(context, at)
             if row["action"] in self.group_participation.actions:
                 return self.group_participation.validate(row, context, self._visible(row))
             if row["action"] in self.acquaintance.actions:
                 return self.acquaintance.validate(row, context, self._visible(row))
+            if row["action"] in self.group_interest_tools.actions:
+                return self._visible(row), None
             if row["action"] in self.group_memory.actions:
                 return self.group_memory.validate(row, context, self._visible(row))
             if row["action"] in self.web.actions:
@@ -615,8 +691,17 @@ class LocalRoleTools:
     def augment(self, batch, context, request, at):
         """The only material read path, also used by delivery and confirmed history."""
         if context.scope.kind is ScopeKind.GROUP:
-            return self.group_participation.augment(batch, context,
+            request = self.group_participation.augment(
+                batch, context,
                 self.group_memory.augment(batch, context, request, at), at)
+            instructions = ""
+            settings = self._settings_values(batch["batch_id"])
+            if self.role_global.catalog_for(context, settings):
+                instructions += "\n" + self.role_global.instruction
+            if self.group_interest_tools.catalog_for(context, settings):
+                instructions += "\n" + self.group_interest_tools.instruction
+            return (replace(request, instruction=request.instruction + instructions)
+                    if instructions else request)
         offers = self.runtime.read_all("SELECT handle FROM conversation_tool_sources WHERE batch_id = ? ORDER BY handle", (batch["batch_id"],))
         materials = [*request.context.materials,
                      PromptMaterial("conversation.tools", "available_source_handles", encode([r["handle"] for r in offers]))]
@@ -663,6 +748,9 @@ class LocalRoleTools:
             instructions += "\n" + WEATHER_INSTRUCTION
         if self.web.catalog_for(context):
             instructions += "\n" + WEB_SEARCH_INSTRUCTION
+        if self.role_global.catalog_for(
+                context, self._settings_values(batch["batch_id"])):
+            instructions += "\n" + self.role_global.instruction
         if self.diagnostics is not None:
             from .diagnostic_tools import DIAGNOSTIC_INSTRUCTION
             instructions += DIAGNOSTIC_INSTRUCTION
@@ -691,9 +779,24 @@ class LocalRoleTools:
         if context.scope.kind is ScopeKind.GROUP:
             if call.action in self.group_participation.actions:
                 return self.group_participation.execute(context, run.task.spec.request_ref, call.call_id, call.action, arguments)
+            if call.action in self.group_interest_tools.actions:
+                settings = self._settings_values(run.task.spec.request_ref)
+                if not self.group_interest_tools.catalog_for(
+                        context, settings):
+                    raise TaskError(
+                        "group_interest_disabled",
+                        "autonomous interests are disabled for this group turn")
+                return self.group_interest_tools.execute(
+                    context, arguments, settings), None
             if call.action in self.acquaintance.actions:
                 return self.acquaintance.execute(context, run.task.spec.request_ref, call.call_id, call.action, arguments)
+            if call.action in self.role_global.actions:
+                raise TaskError("tool_requires_async",
+                                "global role memory requires the asynchronous executor")
             return self.group_memory.execute(context, run.task.spec.request_ref, call.call_id, call.action, arguments)
+        if call.action in self.role_global.actions:
+            raise TaskError("tool_requires_async",
+                            "global role memory requires the asynchronous executor")
         if self.memory is not None and call.action in self.memory.actions:
             if self._memory_is_external():
                 # 目录里已经没有这些工具了；能走到这里说明调用方拿的是旧目录或伪造的
@@ -789,6 +892,10 @@ class LocalRoleTools:
             return False
         if action in self.group_participation.actions:
             return False
+        if action in self.group_interest_tools.actions:
+            return True
+        if action in self.role_global.actions:
+            return False
         if action in self.group_memory.actions:
             return action in self.group_memory.mutations
         if self.calendar is not None and action in self.calendar.actions:
@@ -808,6 +915,8 @@ class LocalRoleTools:
         return action in TOOL_FIELDS and action not in READ_ACTIONS and self.agenda
 
     def execute(self, run, model_call_id: str, call: ToolCall, *, prepared=None) -> ToolExchange:
+        disabled = self._disabled_tools(run.task.spec.request_ref)
+        require_tool_enabled(disabled, action=call.action)
         if call.action in self.weather.actions:
             raise TaskError("tool_requires_async", "weather reads require the supervised asynchronous executor")
         if call.action in self.web.actions:
@@ -893,6 +1002,10 @@ class LocalRoleTools:
             raise
 
     async def execute_async(self, run, model_call_id: str, call: ToolCall) -> ToolExchange:
+        disabled = self._disabled_tools(run.task.spec.request_ref)
+        require_tool_enabled(disabled, action=call.action)
+        if call.action in self.role_global.actions:
+            return await self._execute_role_global(run, model_call_id, call)
         if call.action in self.weather.actions:
             return await self._execute_weather(run, model_call_id, call)
         if call.action in self.web.actions:
@@ -976,6 +1089,54 @@ class LocalRoleTools:
                 connection.execute("""UPDATE conversation_tool_calls SET state = 'unknown', finished_at = ?
                     WHERE task_id = ? AND tool_call_id = ? AND state = 'started'""",
                     (stamp(self.tasks.now()), run.task.task_id, call.call_id))
+            raise
+
+    async def _execute_role_global(self, run, model_call_id, call):
+        context = run.task.spec.context
+        settings = self._settings_values(run.task.spec.request_ref)
+        if not any(tool.action == call.action
+                   for tool in self.role_global.catalog_for(context, settings)):
+            raise TaskError("role_memory_disabled",
+                            "role global memory is disabled or unavailable")
+        request, old, rows = self._prepare(run, model_call_id, call)
+        if old is not None:
+            result, _ = self._validate_result(old, request, context, self.tasks.now())
+            return ToolExchange(call, encode(result))
+        try:
+            result = await self.role_global.execute(
+                context, json.loads(call.arguments_json), settings)
+            run.validate()
+            encoded = encode(result)
+            previous = sum(
+                len(row["result_json"].encode("utf-8"))
+                for row in rows if row["result_json"])
+            if self.external is not None:
+                previous += self.external.material_bytes(
+                    run.task.spec.request_ref)
+            if (len(encoded.encode("utf-8")) > MAX_RESULT_BYTES
+                    or previous + len(encoded.encode("utf-8"))
+                    > MAX_TURN_RESULT_BYTES):
+                raise TaskError(
+                    "tool_result_too_large",
+                    "global role memory result exceeds the local material budget")
+            with self.runtime.transaction() as connection:
+                run.validate()
+                connection.execute(
+                    """UPDATE conversation_tool_calls
+                       SET state = ?, effect = ?, result_json = ?, finished_at = ?
+                       WHERE task_id = ? AND tool_call_id = ? AND state = 'started'""",
+                    (result["state"], result["effect"], encoded,
+                     stamp(self.tasks.now()), run.task.task_id, call.call_id),
+                )
+            return ToolExchange(call, encoded)
+        except BaseException:
+            with self.runtime.transaction() as connection:
+                connection.execute(
+                    """UPDATE conversation_tool_calls
+                       SET state = 'unknown', finished_at = ?
+                       WHERE task_id = ? AND tool_call_id = ? AND state = 'started'""",
+                    (stamp(self.tasks.now()), run.task.task_id, call.call_id),
+                )
             raise
 
     async def _execute_weather(self, run, model_call_id, call):

@@ -18,7 +18,8 @@ from .participation_prompts import (
 from .reply_settings import group_safety_settings, group_wakeup_settings
 
 
-AUTONOMOUS_REASONS = frozenset({"interjection", "repeat", "interest", "context_word", "image_interest", "cold_group", "behavior"})
+AUTONOMOUS_REASONS = frozenset({"interjection", "repeat", "interest", "role_interest",
+                                "context_word", "image_interest", "cold_group", "behavior"})
 
 
 def _act(turn):
@@ -109,8 +110,10 @@ def native_participation_turn(participation, context, native_input, settings, *,
                   for turn in turns)
     request = SimpleNamespace(event=SimpleNamespace(received_at=at), images=getattr(native_input, "images", ()),
                               context=SimpleNamespace(materials=()))
+    role_interests = participation.interests.prompt_items(context, settings)
     hints = group_hints(request, context, settings, recent, {}, native=True,
-                        current_text=current_text, group_trigger=group_trigger)
+                        current_text=current_text, group_trigger=group_trigger,
+                        role_interests=role_interests)
     if len(merged_ids) > 1:
         hints += ("\n本轮 current_source 已合并同一成员的连续纯文本补话；这些片段是一次表达，"
                   "不代表多次叫你。先按完整意思判断要不要接话；接话时抓重点一次回应，"
@@ -136,7 +139,8 @@ def native_participation_turn(participation, context, native_input, settings, *,
     hints += behavior_text
     act = INTERJECTION if facts["enabled"] and facts["initiative"] else ""
     compact = compact_group_hints_facts(request, context, settings, recent, {}, native=True,
-                                        current_text=current_text, group_trigger=group_trigger)
+                                        current_text=current_text, group_trigger=group_trigger,
+                                        role_interests=role_interests)
     if len(merged_ids) > 1:
         compact["merged_fragments"] = len(merged_ids)
     obs_compact = compact_observation_facts(values, observation["facts"])

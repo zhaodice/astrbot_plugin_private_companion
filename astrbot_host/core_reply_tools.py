@@ -27,6 +27,12 @@ from companion_v2.conversation.reply_settings import (
     private_tool_groups_set,
 )
 from companion_v2.conversation.tool_loop import READ_ACTIONS
+from companion_v2.conversation.tool_controls import (
+    disabled_tool_set,
+    filter_host_tools,
+    filter_specs,
+    require_tool_enabled,
+)
 from companion_v2.conversation.native_tool_media import native_image_data
 from companion_v2.execution.models import TaskContext, TaskError, digest, encode, require
 from companion_v2.foundation.outcome import Outcome
@@ -41,16 +47,18 @@ logger = logging.getLogger(__name__)
 
 
 MEMORY_READ_ACTIONS = frozenset({
-    "memory.query", "memory.legacy.query", "memory.sources", "memory.operation.get", "memory.query.status",
+    "memory.query", "memory.legacy.query", "memory.sources", "memory.operation.get",
+    "memory.query.status", "memory.global.query",
 })
 GROUP_READ_ACTIONS = frozenset({"group.memory.query", "group.memory.legacy.query", "group.memory.operation"})
 
 # Stable window-level manifests.  The order is part of the cached tool prefix:
 # append new actions at the end and bump TOOL_MANIFEST_VERSION when the schema
 # changes, never splice a tool in because one message looks special.
-TOOL_MANIFEST_VERSION = "2026-11-22.1"
+TOOL_MANIFEST_VERSION = "2026-11-26.1"
 LEAN_GROUP_TOOL_ORDER = ("group.participation.choose", "group.memory.query",
-                         "group.memory.remember", "acquaintance.recall",
+                         "group.memory.remember", "memory.global.query",
+                         "acquaintance.recall",
                          "reaction.search", "slang.search")
 LEAN_GROUP_ACTIONS = frozenset(LEAN_GROUP_TOOL_ORDER)
 LEAN_PRESERVED_HOST_TOOLS = frozenset({"astr_kb_search"})
@@ -75,7 +83,7 @@ def private_tool_group(owner: str, action: str) -> str:
         return "agenda"
     if owner == "calendar":
         return "calendar"
-    if owner == "memory":
+    if owner in ("memory", "role_global"):
         return "memory"
     if owner in ("source", "growth", "relationships", "timeline", "acquaintance"):
         return "records"
@@ -169,7 +177,7 @@ PHONE_TASK_INSTRUCTION = (
     "用户交办手机操作或调整当前订单时，先调用此工具，再根据回执回复。"
     "结账暂停后的「继续」「改一对一配送」「记得用红包」都是当前订单的接续请求，设置 resume_checkout=true，"
     "保留原订单和最新要求。结账设置改动后需要新的订单截图，付款应按新回执单独回复「确认支付」。"
-    "单独要求唤醒手机、解锁或查看当前页面时，登记普通手机任务，shopping 和 resume_checkout 都设为 false。"
+    "单独要求唤醒手机或解锁时，登记普通手机任务，shopping 和 resume_checkout 都设为 false。"
     "若工具返回 phone_checkout_unavailable，说明当前私聊没有可接续订单，按回执准确回应。"
     "收到「点击极速支付」等说法时，按现有结账和确认状态处理；需要新回执时先接续订单，只有后台回执能确认是否实际支付。"
     "state=queued 表示任务已登记，可以回复已接到任务，等后台回执。"
@@ -190,6 +198,18 @@ PHONE_TASK_SPEC = ToolSpec(
         "shopping": {"type": "boolean", "description": "用户交办点餐、购物或其他涉及付款的任务时设为 true。"},
         "resume_checkout": {"type": "boolean", "description": "调整或接续已登记的当前订单时设为 true，goal 写明原订单和本次调整。单独唤醒手机时设为 false。"},
     }, "required": ["goal"], "additionalProperties": False}))
+PHONE_SCREEN_ACTION = "phone.screen.read"
+PHONE_SCREEN_INSTRUCTION = (
+    "用户问 Android 手机上当前显示什么、App 是否已打开或页面写了什么时，调用 phone.screen.read。"
+    "question 保留用户原问题。只在用户明确询问当前手机画面时使用。工具返回 queued 表示正在读取，"
+    "后台会把画面解读发回当前私聊。按回执说明结果，别用桌面屏幕或旧的手机场景摘要替代当前画面。"
+)
+PHONE_SCREEN_SPEC = ToolSpec(
+    PHONE_SCREEN_ACTION, "只读查看当前 Android 手机屏幕，根据截图回答用户的问题。无点击或页面切换。"
+    "结果由后台发送到原私聊。",
+    encode({"type": "object", "properties": {
+        "question": {"type": "string", "minLength": 1, "maxLength": 500, "description": "用户对手机当前画面的具体问题。"},
+    }, "required": ["question"], "additionalProperties": False}))
 
 
 _GROUP_ADMIN_DENIAL_REASONS = {
@@ -328,6 +348,16 @@ class CoreReplyToolSession:
             self.private_tool_groups = private_tool_groups_set(raw_private_groups)
         except Exception:
             self.private_tool_groups = PRIVATE_TOOL_GROUPS
+        self.disabled_tools = disabled_tool_set(
+            _field(self.prepared, "mcp_disabled_tools", "[]"),
+            strict=False,
+        )
+        self.role_settings = {
+            "role_global_memory_enabled": _field(
+                self.prepared, "role_global_memory_enabled", True),
+            "group_autonomous_interests_enabled": _field(
+                self.prepared, "group_autonomous_interests_enabled", True),
+        }
         self.native_response = self.native_run_context = None
         self.native_calls = []
         from .core_reply_media import frozen_image_locators
@@ -368,6 +398,7 @@ class CoreReplyToolSession:
             phone = getattr(app, "phone_actions", None)
             if phone is not None and phone.available(context):
                 offered.append(_OfferedTool(PHONE_TASK_SPEC, "phone"))
+                offered.append(_OfferedTool(PHONE_SCREEN_SPEC, "phone"))
             memory = getattr(tools, "memory", None)
             if memory is not None and not tools._memory_is_external():
                 offered.extend(_OfferedTool(spec, "memory") for spec in memory.catalog_for(context))
@@ -395,9 +426,18 @@ class CoreReplyToolSession:
             group = getattr(tools, "group_memory", None)
             if group is not None:
                 offered.extend(_OfferedTool(spec, "group") for spec in group.catalog_for(context))
+            interests = getattr(tools, "group_interest_tools", None)
+            if interests is not None:
+                offered.extend(
+                    _OfferedTool(spec, "role_interest")
+                    for spec in interests.catalog_for(context, self.role_settings))
         acquaintance = getattr(tools, "acquaintance", None)
         if acquaintance is not None:
             offered.extend(_OfferedTool(spec, "acquaintance") for spec in acquaintance.catalog_for(context))
+        global_memory = getattr(tools, "role_global", None)
+        if global_memory is not None:
+            offered.extend(_OfferedTool(spec, "role_global")
+                           for spec in global_memory.catalog_for(context, self.role_settings))
         weather = getattr(tools, "weather", None)
         if weather is not None:
             offered.extend(_OfferedTool(spec, "weather") for spec in weather.catalog_for(context))
@@ -425,6 +465,7 @@ class CoreReplyToolSession:
         if (context.scope.kind in (ScopeKind.GROUP, ScopeKind.PRIVATE)
                 and getattr(getattr(getattr(self, "event", None), "platform_meta", None), "name", "") != "wechat_native"):
             offered.append(_OfferedTool(POKE_SPEC, "interaction"))
+        offered = self._filter_disabled(offered)
         if self.context.scope.kind is ScopeKind.GROUP and self.group_tool_profile in ("lean", "standard"):
             # Expose camera strictly by window/role configuration (already
             # filtered by external.catalog_for), never by current speaker, so
@@ -437,6 +478,15 @@ class CoreReplyToolSession:
             if self.private_tool_profile != "full":
                 return private_tool_manifest(offered, self.private_tool_profile, self.private_tool_groups)
         return tuple(offered)
+
+    def _filter_disabled(self, offered):
+        if not self.disabled_tools:
+            return offered
+        return list(filter_specs(
+            offered,
+            self.disabled_tools,
+            action_getter=lambda item: item.spec.action,
+        ))
 
     def _prune_disabled_private_relay(self, offered):
         """Omit relay tools in private chat when window relay is fully disabled."""
@@ -721,6 +771,11 @@ class CoreReplyToolSession:
     async def call(self, action, wrapper, arguments):
         result = None
         try:
+            require_tool_enabled(
+                self.disabled_tools,
+                action=action,
+                native_name=native_tool_name(action),
+            )
             self._latch_group_skip(wrapper, action, arguments)
             await self.authorize(wrapper)
             from companion_v2.conversation.behavior.service import ANNOTATIONS
@@ -745,7 +800,7 @@ class CoreReplyToolSession:
             elif offered.owner == "evidence":
                 result = await self.evidence()
             elif offered.owner == "phone":
-                result = self._phone_task(arguments)
+                result = self._phone_task(action, arguments)
             elif offered.owner == "interaction":
                 result = await self.poke(arguments)
             elif offered.owner == "external":
@@ -778,6 +833,15 @@ class CoreReplyToolSession:
             elif offered.owner == "source":
                 from .core_reply_sources import execute_core_source_read
                 result = await execute_core_source_read(self, native_call_id(wrapper, action, arguments), arguments)
+            elif offered.owner == "role_global":
+                result = await self.application.tools.role_global.execute(
+                    self.context, arguments, self.role_settings)
+            elif offered.owner == "role_interest":
+                call_id = native_call_id(wrapper, action, arguments)
+                result = executor_for(self.application).local(
+                    self, call_id, action, arguments,
+                    lambda _identifier: self.application.tools.group_interest_tools.execute(
+                        self.context, arguments, self.role_settings))
             elif offered.owner == "diagnostics":
                 from .core_reply_diagnostics import execute_core_diagnostic
                 result = await execute_core_diagnostic(self, native_call_id(wrapper, action, arguments), action, arguments)
@@ -850,12 +914,19 @@ class CoreReplyToolSession:
             return encode({"state": "failed", "effect": "none", "code": "invalid_tool_arguments",
                            "retry_disposition": "input_invalid"})
 
-    def _phone_task(self, arguments):
+    def _phone_task(self, action, arguments):
         """Register one due phone task; execution happens in the background loop."""
         app, context = self.application, self.context
         service = getattr(app, "phone_actions", None)
         if service is None or not service.available(context):
             raise TaskError("phone_disabled", "the phone channel is not enabled for this window")
+        if action == PHONE_SCREEN_ACTION:
+            document = service.create_screen_read(context, arguments["question"], request_id=self.turn_id)
+            if document["state"] != "active":
+                return {"state": document["state"], "effect": "none", "payload": document,
+                        "reason": "本轮已登记过读屏请求，请查看原回执。"}
+            return {"state": "queued", "effect": "committed", "payload": document,
+                    "reason": "读屏请求已登记，解读结果会发回当前私聊。"}
         goal = arguments.get("goal")
         if not isinstance(goal, str) or not goal.strip():
             raise TaskError("invalid_tool_arguments", "a phone task needs a goal")
@@ -939,7 +1010,7 @@ class CoreReplyToolSession:
                 "operation_id": receipt.operation_id}
 
 
-def inject_core_reply_tools(event, req, *, application):
+def inject_core_reply_tools(event, req, *, application, provision_image_access: bool = True):
     """Copy the request's ToolSet and append authorized tools for this event only."""
     state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
     if not isinstance(state, dict):
@@ -963,12 +1034,13 @@ def inject_core_reply_tools(event, req, *, application):
         not private_chat or profile == "full" or "media" in custom_groups
     )
     if media_enabled:
-        # Consent is scoped to the exact AstrBot conversation. A new conversation id
-        # (persona switch, restart, new private session) makes every retained image
-        # capability invisible until it is provisioned for this scope again, so do it
-        # here, on the real event context, before the catalogue is filtered.
-        from .image_access import ensure_image_access
-        ensure_image_access(application.runtime, session.context, observed_at=application.tasks.now())
+        if provision_image_access:
+            # Consent is scoped to the exact AstrBot conversation. A new conversation id
+            # (persona switch, restart, new private session) makes every retained image
+            # capability invisible until it is provisioned for this scope again, so do it
+            # here, on the real event context, before the catalogue is filtered.
+            from .image_access import ensure_image_access
+            ensure_image_access(application.runtime, session.context, observed_at=application.tasks.now())
         offered, image_values = core_image_tools(session, session.catalog())
     else:
         offered, image_values = session.catalog(), None
@@ -979,6 +1051,7 @@ def inject_core_reply_tools(event, req, *, application):
         inject_core_reaction_instruction(event, req, semantic, session.turn_id)
     existing = list(getattr(getattr(req, "func_tool", None), "tools", ()))
     existing = [tool for tool in existing if not isinstance(tool, CoreReplyFunctionTool)]
+    existing = filter_host_tools(existing, session.disabled_tools)
     if session.group_tool_profile == "lean" and session.context.scope.kind is ScopeKind.GROUP:
         # The lean manifest owns the group tool surface.  Host shell, file,
         # python and search schemas are large and rarely needed for banter,
@@ -1002,6 +1075,18 @@ def inject_core_reply_tools(event, req, *, application):
             req.system_prompt = (req.system_prompt.rstrip() + "\n\n" + LEAN_GROUP_INSTRUCTION).lstrip()
         if any(item.owner == "phone" for item in offered) and PHONE_TASK_INSTRUCTION not in req.system_prompt:
             req.system_prompt += "\n\n" + PHONE_TASK_INSTRUCTION
+        if any(item.owner == "role_global" for item in offered):
+            from companion_v2.memory.role_global import RoleGlobalMemoryTools
+            if RoleGlobalMemoryTools.instruction not in req.system_prompt:
+                req.system_prompt += "\n\n" + RoleGlobalMemoryTools.instruction
+        if any(item.owner == "role_interest" for item in offered):
+            from companion_v2.conversation.group_interests import (
+                GroupAutonomousInterestTools,
+            )
+            if GroupAutonomousInterestTools.instruction not in req.system_prompt:
+                req.system_prompt += "\n\n" + GroupAutonomousInterestTools.instruction
+        if any(item.spec.action == PHONE_SCREEN_ACTION for item in offered) and PHONE_SCREEN_INSTRUCTION not in req.system_prompt:
+            req.system_prompt += "\n\n" + PHONE_SCREEN_INSTRUCTION
         if any(item.owner == "authoring" for item in offered):
             from companion_v2.conversation.content.authoring_workflow import INSTRUCTION as AUTHORING_INSTRUCTION
             if AUTHORING_INSTRUCTION not in req.system_prompt:
@@ -1019,6 +1104,26 @@ def inject_core_reply_tools(event, req, *, application):
         req.system_prompt = (current.rstrip() + "\n\n" + KB_TOOL_INSTRUCTION).lstrip()
     inject_core_image_prompt(session, req, offered, image_values)
     return tuple(tool._action for tool in appended)
+
+
+async def inject_core_reply_tools_async(event, req, *, application):
+    """Async variant of :func:`inject_core_reply_tools` that offloads image-access SQLite I/O."""
+    state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+    if not isinstance(state, dict):
+        return ()
+    session = state.get("_tool_session")
+    if (not isinstance(session, CoreReplyToolSession) or session.application is not application
+            or session.prepared is not state.get("prepared")):
+        session = CoreReplyToolSession(event, state, application)
+        state["_tool_session"] = session
+    private_chat = session.context.scope.kind is ScopeKind.PRIVATE
+    profile = session.private_tool_profile
+    custom_groups = session.private_tool_groups if profile == "custom" else frozenset()
+    media_enabled = not private_chat or profile == "full" or "media" in custom_groups
+    if media_enabled:
+        from .image_access import ensure_image_access_async
+        await ensure_image_access_async(application.runtime, session.context, observed_at=application.tasks.now())
+    return inject_core_reply_tools(event, req, application=application, provision_image_access=False)
 
 
 def inject_core_turn_notes(event, req):

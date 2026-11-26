@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import unittest
 
-from companion_v2.conversation.awareness_context import ConversationAwarenessContext
+from companion_v2.conversation.awareness_context import ConversationAwarenessContext, INSTRUCTION
 from companion_v2.execution.models import AudienceRef, TaskContext, TaskError, encode
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind, ScopeRef, SourceRef, SubjectKind, SubjectRef, VersionRef
@@ -119,9 +119,9 @@ class RoleAwarenessTests(unittest.TestCase):
             self.service.record_input(connection, ctx or self.group, at, text, key, source=source,
                                       peer_count=peer_count, quote_sender_ids=quote_sender_ids)
 
-    def record_private(self, text="先别告诉群里", at=NOW, key="private-1", ctx=None):
+    def record_private(self, text="先别告诉群里", at=NOW, key="private-1", ctx=None, source=None):
         with self.runtime.transaction() as connection:
-            self.service.record_input(connection, ctx or self.private, at, text, key)
+            self.service.record_input(connection, ctx or self.private, at, text, key, source=source)
 
     def test_private_turn_sees_same_persons_public_group_activity(self):
         self.record_group(peer_count=3)
@@ -179,6 +179,38 @@ class RoleAwarenessTests(unittest.TestCase):
         row = self.runtime.read_one("SELECT value FROM runtime_metadata WHERE key = ?",
                                     (PREFIX + owner_key(self.private),))
         self.assertNotIn("先别告诉群里", row["value"])
+
+    def test_window_transition_projects_only_a_boolean_for_the_same_person_and_route(self):
+        self.record_private()
+        at = NOW + timedelta(minutes=1)
+        messages = type("Messages", (), {"cross_window_context": self.prompt})()
+        section = _cross_window_section(messages, self.group, at, "换个说法也能接话", input_at=at).render()
+        self.assertEqual(json.loads(section.split("\n")[-1])[0]["content"], {"recent_window_transition": True})
+        self.assertNotIn("先别告诉群里", section)
+        self.assertIsNone(self.service.snapshot(self.other, at, input_at=at))
+        self.assertIsNone(self.service.snapshot(context(GROUP_B), at, input_at=at))
+
+        self.record_group(at=at)
+        following = at + timedelta(seconds=1)
+        self.assertIsNone(self.service.snapshot(self.group, following, input_at=following))
+        private = self.service.snapshot(self.private, following, input_at=following)
+        self.assertIs(private["recent_window_transition"], True)
+
+    def test_window_transition_respects_input_time_expiry_and_source_withdrawal(self):
+        source = SourceRef("private-source", "conversation.native_input", PRIVATE,
+                           VersionRef("private-source", 1), NOW)
+        self.service.source_validator = FakeSourceValidator()
+        self.record_private(source=source)
+        at = NOW + timedelta(minutes=31)
+        self.assertIsNone(self.service.snapshot(self.group, at, input_at=NOW - timedelta(seconds=1)))
+        self.assertIsNone(self.service.snapshot(self.group, at, input_at=at))
+        input_at = NOW + timedelta(seconds=30)
+        self.assertEqual(self.service.snapshot(self.group, at, input_at=input_at), {"recent_window_transition": True})
+        self.service.source_validator.current = False
+        self.assertIsNone(self.service.snapshot(self.group, at, input_at=input_at))
+        self.service.source_validator.current = True
+        self.acquaintance.settings = FakeSettings(**{"person.cross_window_continuity_enabled": False})
+        self.assertIsNone(self.service.snapshot(self.group, at, input_at=input_at))
 
     def test_other_subject_and_other_role_do_not_share_presence(self):
         self.record_group()
@@ -299,6 +331,31 @@ class RoleAwarenessTests(unittest.TestCase):
         self.assertIn("【跨窗口在场】", section)
         self.assertIn("cross_window_awareness", section)
         self.assertIn("明天谁有空", json.loads(json.dumps(section, ensure_ascii=False)))
+
+    def test_private_prompt_prioritizes_the_current_window_over_cross_window_memory(self):
+        self.record_group(text="周末去杭州还是苏州？")
+        messages = type("Messages", (), {"cross_window_context": self.prompt})()
+        section = _cross_window_section(messages, self.private, NOW + timedelta(minutes=2)).render()
+
+        self.assertIn("当前对话窗口自身的会话历史、本轮消息、当前称呼与关系是主上下文", section)
+        self.assertIn("跨窗口在场只是同一角色在另一个窗口实际看到或说过的有限辅助片段", section)
+        self.assertIn("若跨窗口线索和当前窗口历史或本轮表达冲突", section)
+        self.assertIn("以当前窗口为准", section)
+
+    def test_handoff_is_conditional_and_does_not_override_a_changed_private_topic(self):
+        self.record_group(text="帮我看周末天气", key="handoff-question")
+        with self.runtime.transaction() as connection:
+            self.service.record_reply(
+                connection, self.group, NOW + timedelta(seconds=1),
+                text="来私聊继续看天气", event_key="handoff-reply")
+        at = NOW + timedelta(minutes=2)
+        payload = self.service.snapshot(self.private, at, current_text="继续")
+
+        self.assertEqual(payload["continuity"]["state"], "handoff")
+        self.assertIn("只有当前消息仍明确承接 prior_question", INSTRUCTION)
+        self.assertIn("当前私聊已经建立新话题时，先回应当前话题", INSTRUCTION)
+        self.assertIn("不自动把旧群聊请求恢复成待办", INSTRUCTION)
+        self.assertNotIn("必须把 prior_question", INSTRUCTION)
 
     def test_core_reply_section_renders_only_the_private_contact_boolean_in_group(self):
         self.acquaintance.private = True

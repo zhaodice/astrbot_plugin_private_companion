@@ -53,6 +53,25 @@ GROUP_CONTINUATION_LIMITS = {"group_conversation_followup_seconds": (15, 1800),
 GROUP_WAKEUP_LEGACY_FIELDS = frozenset(("group_wakeup_enabled", "group_wakeup_direct_words",
                                         "group_wakeup_context_words", "group_wakeup_interest_keywords",
                                         "group_wakeup_question_enabled"))
+GROUP_FAMILIARITY_DEFAULTS = {
+    "group_familiarity_enabled": True,
+    "group_familiarity_speaker_enabled": True,
+    "group_familiarity_mention_enabled": True,
+    "group_familiarity_group_enabled": True,
+    "group_familiarity_min_messages": 6,
+    "group_familiarity_min_active_days": 2,
+    "group_familiarity_group_min_messages": 20,
+    "group_familiarity_group_min_members": 3,
+    "group_familiarity_probability": 0.35,
+    "group_familiarity_cooldown_seconds": 180,
+}
+ROLE_MEMORY_DEFAULTS = {
+    "role_global_memory_enabled": True,
+    "group_autonomous_interests_enabled": True,
+}
+TOOL_CONTROL_DEFAULTS = {
+    "mcp_disabled_tools": "[]",
+}
 GROUP_WAKEUP_DEFAULTS = {"group_wakeup_enabled": True, "group_wakeup_direct_words": "[]",
                          "group_wakeup_context_words": "[]",
                          "group_wakeup_interest_keywords": "[]", "group_wakeup_question_enabled": False,
@@ -69,7 +88,8 @@ GROUP_WAKEUP_DEFAULTS = {"group_wakeup_enabled": True, "group_wakeup_direct_word
                          "group_wakeup_image_enabled": False,
                          "group_wakeup_image_weight": 0.2,
                          "group_wakeup_image_default_guidance_enabled": True,
-                         "group_wakeup_short_text_wait_ms": 15000, "group_wakeup_log_limit": 80}
+                         "group_wakeup_short_text_wait_ms": 15000, "group_wakeup_log_limit": 80,
+                         **GROUP_FAMILIARITY_DEFAULTS}
 GROUP_WAKEUP_ADDED_FIELDS = frozenset(("group_wakeup_bot_name_enabled",
     "group_wakeup_generated_keyword_limit", "group_wakeup_topic_interest_max_boost",
     "group_wakeup_debounce_pending_penalty"))
@@ -88,7 +108,12 @@ GROUP_WAKEUP_LIMITS = {"group_wakeup_question_threshold": (0, 100),
                        "group_wakeup_generated_keyword_limit": (4, 80),
                        "group_wakeup_topic_interest_max_boost": (0, 150),
                        "group_wakeup_debounce_pending_penalty": (0, 100),
-                       "group_wakeup_short_text_wait_ms": (0, 30000), "group_wakeup_log_limit": (10, 300)}
+                       "group_wakeup_short_text_wait_ms": (0, 30000), "group_wakeup_log_limit": (10, 300),
+                       "group_familiarity_min_messages": (2, 100),
+                       "group_familiarity_min_active_days": (1, 30),
+                       "group_familiarity_group_min_messages": (4, 500),
+                       "group_familiarity_group_min_members": (2, 50),
+                       "group_familiarity_cooldown_seconds": (0, 86400)}
 
 # One window-level tool manifest, resolved once per admitted turn.  Keeping the
 # list static is what preserves the provider's cached tool prefix: the plugin
@@ -167,6 +192,9 @@ ROLE_SHARED_FIELDS = (frozenset(asdict(SegmentationPolicy())) | SPACING_FIELDS
     | frozenset(GROUP_AIR_DEFAULTS)
     | frozenset(GROUP_CONTINUATION_DEFAULTS) | frozenset(PRIVATE_CLOSING_DEFAULTS)
     | frozenset(PRIVATE_DEBOUNCE_DEFAULTS)
+    | frozenset(GROUP_FAMILIARITY_DEFAULTS)
+    | frozenset(ROLE_MEMORY_DEFAULTS)
+    | frozenset(TOOL_CONTROL_DEFAULTS)
     | (frozenset(GROUP_WAKEUP_DEFAULTS) - GROUP_WAKEUP_GROUP_FIELDS)
     | frozenset(GROUP_SAFETY_DEFAULTS) | frozenset(SILENCE_DEFAULTS) | frozenset(OUTBOUND_DEFAULTS) | frozenset(TEXT_DEFAULTS)
     | frozenset(FORWARD_DEFAULTS) | frozenset(CONTEXT_IMAGE_DEFAULTS)
@@ -284,7 +312,8 @@ def private_debounce_settings(values):
     try:
         return PrivateDebounceSettings.from_milliseconds(
             settings["private_debounce_enabled"], settings["private_debounce_min_ms"],
-            settings["private_debounce_max_ms"], settings["private_debounce_total_ms"])
+            settings["private_debounce_max_ms"], settings["private_debounce_total_ms"],
+            semantic_enabled=settings["private_debounce_semantic_enabled"])
     except ValueError as error:
         raise ConfigurationError("reply_configuration_invalid",
                                  "private debounce timing is invalid") from error
@@ -295,7 +324,11 @@ def group_wakeup_settings(values):
     if any(type(settings[key]) is not bool for key in ("group_wakeup_enabled", "group_wakeup_question_enabled",
                                                     "group_wakeup_cold_group_enabled", "group_wakeup_bot_name_enabled",
                                                     "group_wakeup_image_enabled",
-                                                    "group_wakeup_image_default_guidance_enabled")):
+                                                    "group_wakeup_image_default_guidance_enabled",
+                                                    "group_familiarity_enabled",
+                                                    "group_familiarity_speaker_enabled",
+                                                    "group_familiarity_mention_enabled",
+                                                    "group_familiarity_group_enabled")):
         raise ConfigurationError("reply_configuration_invalid", "group wakeup switches must be boolean")
     for key in GROUP_WAKEUP_WORD_FIELDS:
         raw = settings[key]
@@ -331,6 +364,10 @@ def group_wakeup_settings(values):
     if (type(image_weight) not in (int, float) or not 0 <= image_weight <= 1
             or not math.isfinite(image_weight)):
         raise ConfigurationError("reply_configuration_invalid", "invalid group image wakeup weight")
+    familiarity_chance = settings["group_familiarity_probability"]
+    if (type(familiarity_chance) not in (int, float) or not 0 <= familiarity_chance <= 1
+            or not math.isfinite(familiarity_chance)):
+        raise ConfigurationError("reply_configuration_invalid", "invalid group familiarity probability")
     for key, (minimum, maximum) in GROUP_WAKEUP_LIMITS.items():
         if type(settings[key]) is not int or not minimum <= settings[key] <= maximum:
             raise ConfigurationError("reply_configuration_invalid", "invalid group wakeup setting")
@@ -371,6 +408,7 @@ def validate(values):
     continuation = set(GROUP_CONTINUATION_DEFAULTS)
     private_closing = set(PRIVATE_CLOSING_DEFAULTS)
     private_debounce = set(PRIVATE_DEBOUNCE_DEFAULTS)
+    private_debounce_timing = private_debounce - {"private_debounce_semantic_enabled"}
     wakeup = set(GROUP_WAKEUP_DEFAULTS)
     safety = set(GROUP_SAFETY_DEFAULTS)
     silence = set(SILENCE_DEFAULTS)
@@ -382,22 +420,32 @@ def validate(values):
     understanding = set(UNDERSTANDING_DEFAULTS)
     spacing = set(SPACING_DEFAULTS)
     diagnostics = set(DIAGNOSTIC_DEFAULTS)
-    tool = set(GROUP_TOOL_DEFAULTS) | set(PRIVATE_TOOL_DEFAULTS)
+    tool = (set(GROUP_TOOL_DEFAULTS) | set(PRIVATE_TOOL_DEFAULTS)
+            | set(TOOL_CONTROL_DEFAULTS))
+    role_memory = set(ROLE_MEMORY_DEFAULTS)
     optional = set(values) - expected - {"image_position"}
     provided = set(values)
     if (not legacy_required <= provided
-            or optional - voice - air - continuation - private_closing - private_debounce - wakeup - safety - silence - presentation - outbound - forward - captions - image_narration - understanding - spacing - diagnostics - tool
+            or optional - voice - air - continuation - private_closing - private_debounce - wakeup - safety - silence - presentation - outbound - forward - captions - image_narration - understanding - spacing - diagnostics - tool - role_memory
             or (optional & voice and not (voice - {"voice_conversion_scope"}) <= optional)
-            or any(optional & block and not block <= optional for block in (air, continuation, private_closing, private_debounce, presentation))
+            or any(optional & block and not block <= optional for block in
+                   (air, continuation, private_closing, private_debounce_timing, presentation))
             or optional & spacing not in (set(), spacing)
             or optional & forward not in (set(), forward)
             or optional & wakeup not in (set(), set(GROUP_WAKEUP_LEGACY_FIELDS),
                                         set(GROUP_WAKEUP_PREVIOUS_FIELDS), set(GROUP_WAKEUP_PROMPT_FIELDS), wakeup)):
         raise ConfigurationError("reply_configuration_invalid", "provide the declared reply settings")
     try:
+        from .tool_controls import disabled_tool_set
+        if "mcp_disabled_tools" in values:
+            disabled_tool_set(values["mcp_disabled_tools"])
         if values.get("group_tool_profile", "full") not in GROUP_TOOL_PROFILES:
             raise ValueError("invalid group tool profile")
         private_tool_settings(values)
+        for name in ("role_global_memory_enabled",
+                     "group_autonomous_interests_enabled"):
+            if type(values.get(name, True)) is not bool:
+                raise ValueError(f"invalid {name} switch")
         diagnostic_limit = values.get("reply_diagnostic_limit", DIAGNOSTIC_DEFAULTS["reply_diagnostic_limit"])
         if type(diagnostic_limit) is not int or not 10 <= diagnostic_limit <= 300:
             raise ValueError("invalid reply diagnostic limit")
@@ -473,6 +521,7 @@ def configuration_fields(segmentation, streaming, gap, voice=None):
               **SPACING_DEFAULTS, "image_position": "after_text", **voice_settings(voice), **GROUP_AIR_DEFAULTS,
               **GROUP_CONTINUATION_DEFAULTS, **PRIVATE_CLOSING_DEFAULTS,
               **PRIVATE_DEBOUNCE_DEFAULTS, **GROUP_WAKEUP_DEFAULTS,
+              **ROLE_MEMORY_DEFAULTS, **TOOL_CONTROL_DEFAULTS,
               **GROUP_SAFETY_DEFAULTS, **SILENCE_DEFAULTS, **OUTBOUND_DEFAULTS, **TEXT_DEFAULTS}
     # The field remains in the backend contract so older snapshots can still
     # be read, but it is no longer a choice: deterministic rule completion is
@@ -501,13 +550,16 @@ def configuration_fields(segmentation, streaming, gap, voice=None):
                    "private_image_vision_max_chars": (120, 4000),
                    "private_image_vision_wait_seconds": (1, 30),
                    "private_image_provider_failure_cooldown_seconds": (0, 3600)})
+    limits["group_familiarity_probability"] = (0, 1)
     return tuple(FieldDefinition(GROUP + "." + name, GROUP, GROUP,
         ValueKind.WEIGHT if name == "part_gap_log_base" else
         ValueKind.PROBABILITY if name in ("voice_probability", "voice_primary_mention_probability",
-                                          "group_wakeup_interest_probability") else
+                                          "group_wakeup_interest_probability",
+                                          "group_familiarity_probability") else
         {bool: ValueKind.BOOLEAN, int: ValueKind.INTEGER, float: ValueKind.PROBABILITY, str: ValueKind.TEXT}[type(value)], value,
         layers=CONFIGURATION_LAYERS, owner_id=OWNER,
         **(dict(zip(("minimum", "maximum"), limits[name])) if name in limits else {}),
+        **({"maximum_chars": 49152} if name == "mcp_disabled_tools" else {}),
         **({"decimal_places": 1} if name == "part_gap_log_base" else {}))
         for name, value in defaults.items())
 

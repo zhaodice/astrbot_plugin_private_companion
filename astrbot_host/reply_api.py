@@ -3,6 +3,7 @@
 import asyncio
 from contextlib import nullcontext
 import json
+import re
 
 from astrbot.api.web import request
 from companion_v2.configuration.models import ConfigLayer
@@ -17,7 +18,15 @@ from .management_identity import dashboard_operator
 
 
 PREFIX = "/astrbot_plugin_private_companion/reply"
-READ_ONLY_STYLE_METHODS = frozenset({"list", "list_samples", "export_pack", "preview_import"})
+READ_ONLY_STYLE_METHODS = frozenset({"list", "list_samples", "export_pack", "preview_import", "preview_dedupe"})
+TOOL_DISPLAY_NAMES = {
+    "memory.global.query": "全局记忆检索",
+    "group.interest.manage": "自主兴趣管理",
+    "relay_message": "准备跨会话消息",
+    "relay_send": "发送跨会话消息",
+    "relay_message_many": "准备多条跨会话消息",
+    "relay_send_many": "发送多条跨会话消息",
+}
 
 
 class ReplyWebAPI:
@@ -45,6 +54,8 @@ class ReplyWebAPI:
                  "Decide a learned expression signal"),
                 (PREFIX + "/style/cleanup", self.style_cleanup, ["POST"],
                  "Reject pending expression candidates whose evidence is gone"),
+                (PREFIX + "/style/dedupe", self.style_dedupe, ["POST"],
+                 "Preview or consolidate duplicate expression rules"),
                 (PREFIX + "/recalls", self.recalls, ["GET"],
                  "Read this window's withdrawn messages within the configured bound"),
                 (PREFIX + "/harassment", self.harassment, ["GET"],
@@ -68,6 +79,97 @@ class ReplyWebAPI:
         from .voice import tts_provider_catalog
         return tts_provider_catalog(self.controller.context)
 
+    @staticmethod
+    def _tool_copy(value, fallback):
+        """Keep dashboard metadata short and free of URLs or credential-like text."""
+
+        text = value if isinstance(value, str) else ""
+        text = re.sub(r"https?://\S+", "", text, flags=re.IGNORECASE)
+        text = re.sub(
+            r"\b(?:api[\s_-]*key|token|secret|password)\s*[:=]\s*\S+",
+            "", text, flags=re.IGNORECASE)
+        text = " ".join(text.split())
+        return text[:180] or fallback
+
+    @classmethod
+    def _tool_display_name(cls, action, description):
+        if action in TOOL_DISPLAY_NAMES:
+            return TOOL_DISPLAY_NAMES[action]
+        copy = cls._tool_copy(description, "")
+        first = re.split(r"[。！？；.!?;]", copy, maxsplit=1)[0].strip()
+        return first[:40] or action
+
+    def _tool_catalog(self, session, status):
+        """Return the complete sanitized tool directory, including disabled tools."""
+
+        from companion_v2.conversation.group_interests import GroupAutonomousInterestTools
+        from companion_v2.conversation.relay_tools import tool_descriptors
+        from companion_v2.conversation.tool_controls import disabled_tool_set
+        from companion_v2.memory.role_global import RoleGlobalMemoryTools
+        from .core_reply_tools import native_tool_name
+
+        settings = status.get("settings") if isinstance(status.get("settings"), dict) else {}
+        disabled = disabled_tool_set(
+            settings.get("mcp_disabled_tools", "[]"), strict=False)
+        entries = []
+
+        def add(identifier, native_name, display_name, group, description):
+            if not isinstance(identifier, str) or not identifier.strip():
+                return
+            identifier = identifier.strip()
+            entries.append({
+                "id": identifier,
+                "native_name": native_name.strip() if isinstance(native_name, str) else identifier,
+                "display_name": self._tool_copy(display_name, identifier)[:60],
+                "group": group,
+                "description": self._tool_copy(description, identifier),
+                "enabled": identifier not in disabled and native_name not in disabled,
+            })
+
+        tools = getattr(session.application, "tools", None)
+        specs = []
+        catalog = getattr(tools, "catalog", ()) if tools is not None else ()
+        if isinstance(catalog, (list, tuple)):
+            specs.extend(item for item in catalog
+                         if isinstance(getattr(item, "action", None), str))
+        specs.extend(RoleGlobalMemoryTools.catalog)
+        specs.extend(GroupAutonomousInterestTools.catalog)
+        for spec in specs:
+            action = spec.action
+            add(action, native_tool_name(action),
+                self._tool_display_name(action, spec.description),
+                "companion", spec.description)
+
+        for descriptor in tool_descriptors():
+            spec = descriptor.tool
+            add(spec.action, native_tool_name(spec.action),
+                self._tool_display_name(spec.action, spec.description),
+                "relay", spec.description)
+
+        native_tools = ()
+        try:
+            manager = self.controller.context.get_llm_tool_manager()
+            native_tools = getattr(manager, "func_list", ()) or ()
+        except Exception:
+            pass
+        for tool in native_tools:
+            name = getattr(tool, "name", None)
+            if not isinstance(name, str) or not name.strip():
+                continue
+            name = name.strip()
+            server = getattr(tool, "mcp_server_name", None)
+            group = "mcp" if isinstance(server, str) and server.strip() else "native"
+            description = getattr(tool, "description", "")
+            display = (f"MCP {server.strip()} · {name}"
+                       if group == "mcp" else f"AstrBot 工具 · {name}")
+            add(name, name, display, group, description)
+
+        unique = {}
+        for entry in entries:
+            unique.setdefault(entry["id"], entry)
+        return sorted(unique.values(),
+                      key=lambda item: (item["group"], item["display_name"], item["id"]))
+
     def _snapshot(self, *, not_initialized_message="load the V2 profile first"):
         controller = self.controller
         if controller._terminated:
@@ -87,6 +189,7 @@ class ReplyWebAPI:
             from .video.compressor import video_capabilities_status
             status["documents"] = parser_availability()
             status["video"] = video_capabilities_status()
+            status["tools"] = self._tool_catalog(session, status)
             try:
                 from companion_v2.conversation.web_understanding import WebUnderstandingSettings
                 status["web"] = WebUnderstandingSettings(
@@ -187,6 +290,22 @@ class ReplyWebAPI:
                             return getattr(manager, method)(
                                 operator=operator, context=session.profile.target, **arguments)
 
+                        if method == "learn":
+                            manager = ExpressionStyleManagement(session.application)
+
+                            def prepare_learn():
+                                operator = dashboard_operator(runtime, username, at=observed_at)
+                                return manager.prepare_learn(
+                                    operator=operator, context=session.profile.target, **arguments)
+
+                            prepared = await asyncio.to_thread(prepare_learn)
+                            if prepared.failure is not None:
+                                return outcome_response(prepared)
+                            payload = prepared.unwrap()
+                            if payload["launch"] is None:
+                                return outcome_response(Outcome.success(payload["result"]))
+                            result = session.application.expression_style.launch_prepared(*payload["launch"])
+                            return outcome_response(Outcome.success(result))
                         return outcome_response(await asyncio.to_thread(execute_mutation))
 
                 def execute_read():
@@ -204,7 +323,7 @@ class ReplyWebAPI:
     async def style(self):
         from .web_api import outcome_response
         query = request.query
-        if set(query.keys()) - {"state", "dimension", "limit", "after_id"} or any(
+        if set(query.keys()) - {"state", "dimension", "kind", "limit", "after_id"} or any(
                 len(query.getlist(key)) != 1 for key in query.keys()):
             return outcome_response(Outcome.failed("expression_query_invalid", "unknown or repeated query fields"))
         try:
@@ -212,8 +331,8 @@ class ReplyWebAPI:
         except (TypeError, ValueError):
             return outcome_response(Outcome.failed("expression_query_invalid", "invalid page size"))
         return await self._style(dict(state=query.get("state") or "pending",
-            dimension=query.get("dimension") or None, limit=limit,
-            after_id=query.get("after_id") or None), "list")
+            dimension=query.get("dimension") or None, kind=query.get("kind") or None,
+            limit=limit, after_id=query.get("after_id") or None), "list")
 
     async def style_command(self):
         from .web_api import outcome_response
@@ -238,6 +357,27 @@ class ReplyWebAPI:
 
     async def style_cleanup(self):
         return await self._sample_action({"operation_key"}, "cleanup_unreadable")
+
+    async def style_dedupe(self):
+        from .web_api import outcome_response
+        try:
+            raw = await request.body()
+            if len(raw) > 8192 or request.query:
+                raise ValueError
+            data = json.loads(raw.decode("utf-8"), object_pairs_hook=self._unique_json_pairs,
+                              parse_constant=self._reject_nonfinite_json)
+            if type(data) is not dict or type(data.get("dry_run")) is not bool:
+                raise ValueError
+            keys = set(data)
+            if data["dry_run"]:
+                if keys != {"dry_run"}:
+                    raise ValueError
+                return await self._style({}, "preview_dedupe")
+            if keys != {"dry_run", "operation_key"}:
+                raise ValueError
+            return await self._style(data, "dedupe_rules")
+        except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
+            return outcome_response(Outcome.failed("expression_command_invalid", "invalid expression dedupe action"))
 
     async def style_samples(self):
         from .web_api import outcome_response

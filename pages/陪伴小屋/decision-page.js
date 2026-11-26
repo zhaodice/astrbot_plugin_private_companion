@@ -8,6 +8,7 @@ window.CompanionDecisionPage = (() => {
     ["response", "bell", "回应判断"],
     ["tempo", "clock-3", "参与节奏"],
     ["safety", "shield", "沉默与安全"],
+    ["tools", "brain-circuit", "Bot 全局记忆与工具"],
     ["guard", "shield-alert", "防骚扰", "private"],
     ["group", "users-round", "群聊参与"],
   ];
@@ -15,6 +16,7 @@ window.CompanionDecisionPage = (() => {
     response: ["wakeup_direct", "wakeup_interest", "wakeup_members"],
     tempo: ["group_continuation", "private_debounce", "wakeup_cold_group", "wakeup_fatigue"],
     safety: ["silence_policy", "group_air_guard", "private_closing", "group_content_safety"],
+    tools: ["memory_tools"],
   };
   let root = null;
   let activeView = "overview";
@@ -254,6 +256,29 @@ window.CompanionDecisionPage = (() => {
         ${stat("回复快照", "回合开始定格", "拦截只调整措辞，不改变人格与授权")}
       </div>`;
     }
+    if (view === "tools") {
+      const tools = Array.isArray(replyStatus?.tools) ? replyStatus.tools : [];
+      const enabled = tools.filter(tool => tool?.enabled === true).length;
+      return `<div class="decision-stats decision-stats-four">
+        ${stat("Bot 全局记忆", flag(s, "role_global_memory_enabled"),
+          "按角色共享，不按好友、陌生人、群聊或私聊拆分")}
+        ${stat("自主兴趣", flag(s, "group_autonomous_interests_enabled"),
+          "由角色结合所见、人设、记忆与意愿自行维护")}
+        ${stat("可用工具", tools.length ? `${enabled} / ${tools.length} 开` : "—",
+          tools.length ? "可在下方逐项勾选" : "当前尚未读取工具目录")}
+        ${stat("工具范围", "角色级", "Companion、Relay、AstrBot 原生与 MCP 共用")}
+      </div>
+      <section class="decision-overview-section">
+        <div class="decision-block-heading"><div><h2>角色自己的记忆与主动性</h2>
+          <p>全局记忆属于当前 Bot 角色。陌生人的第一次私聊也会进入同一个记忆池；跨私聊只提供交流事实、时间与来源，不向另一个私聊泄露对方的原话。</p></div></div>
+        <div class="decision-reference-list">
+          <div><b>可跨群检索</b><span>群公开消息按角色记忆归集，可回答“其他群聊了什么”</span></div>
+          <div><b>私聊边界</b><span>当前私聊可读原文；其他用户私聊原文隐藏，Bot 自己的私聊发言可读</span></div>
+          <div><b>主动工具</b><span>记忆检索、消息递送与自主兴趣都由模型按人设和语境决定是否调用</span></div>
+          <div><b>统一禁用</b><span>下方取消勾选后，工具不再出现在本轮可用目录中</span></div>
+        </div>
+      </section>`;
+    }
     const atmosphere = ["enable_group_mood_detection", "enable_group_roleplay_strength",
       "enable_group_moments", "enable_group_moment_portrait"].filter(key => on(g, key)).length;
     /* 四张卡各自的来源（与配置分区声明一致）：话题线、氛围、复读来自角色层
@@ -290,6 +315,7 @@ window.CompanionDecisionPage = (() => {
         response: `总闸 · ${replyReady ? on(s, "group_wakeup_enabled") ? "默认开" : "已关闭" : "读取中"}`,
         tempo: `冷群重启 · ${flag(s, "group_wakeup_cold_group_enabled")}`,
         safety: `沉默 · ${flag(s, "recall_silence_enabled")} · 护栏 ${replyReady ? ["enable_group_injection_guard", "enable_group_privacy_guard", "enable_group_reality_promise_guard"].filter(key => on(s, key)).length + " / 3" : "读取中"}`,
+        tools: `全局记忆 · ${flag(s, "role_global_memory_enabled")} · 自主兴趣 ${flag(s, "group_autonomous_interests_enabled")}`,
         guard: !harassmentApplies() ? "只对私聊窗口生效"
           : harassment.data ? `已拦截 ${harassment.data.entries.length} 人 · ${harassment.data.settings.enabled ? "已开启" : "未开启"}` : "读取中",
         group: `复读跟读 · ${sourceFlag("role", g, "enable_group_repeat_follow")}`,
@@ -312,7 +338,7 @@ window.CompanionDecisionPage = (() => {
       panel.hidden = panel.dataset.decisionPanel !== view;
     }
     const reply = root.querySelector?.("#decisionReplyWorkspace");
-    if (reply) reply.hidden = !["response", "tempo", "safety"].includes(view);
+    if (reply) reply.hidden = !["response", "tempo", "safety", "tools"].includes(view);
     const groupWrap = root.querySelector?.("[data-decision-editor='participation']");
     if (groupWrap) groupWrap.hidden = !["safety", "group"].includes(view);
     const groupOnly = root.querySelector?.("[data-decision-group-only]");
