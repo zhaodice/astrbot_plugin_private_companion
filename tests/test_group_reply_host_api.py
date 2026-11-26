@@ -588,6 +588,7 @@ class GroupReplyHostAPITests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(samples["data"]["next_cursor"])
         self.assertEqual(samples["data"]["unavailable_reason"], "role_binding_missing")
         self.assertIs(samples["data"]["sample_review_enabled"], False)
+        self.assertEqual(samples["data"]["sample_review_auto_after"], 0)
         # The reader aggregates one runtime block per source, so the empty page
         # keeps the same stable shape instead of leaving it undefined.
         runtime = samples["data"]["runtime"]
@@ -597,6 +598,7 @@ class GroupReplyHostAPITests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIs(runtime["learning_enabled"], False)
         self.assertIs(runtime["application_enabled"], False)
         self.assertEqual((runtime["minimum_samples"], runtime["eligible_samples"]), (0, 0))
+        self.assertEqual(runtime["sample_review_auto_after"], 0)
         self.assertIsNone(runtime["new_messages"])
         self.assertIsNone(runtime["required_new_messages"])
         self.assertEqual((runtime["group_batches_today"], runtime["group_daily_batch_limit"]), (0, 0))

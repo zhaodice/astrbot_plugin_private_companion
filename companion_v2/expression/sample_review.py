@@ -46,11 +46,50 @@ class ExpressionSampleReviewStore:
         self.write(context, value)
         return value
 
+    def _write(self, connection, context, value):
+        connection.execute("""INSERT INTO runtime_metadata(key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+            (self.key(context, value["handle"]), encode(value)))
+
     def write(self, context, value):
         with self.runtime.transaction() as connection:
-            connection.execute("""INSERT INTO runtime_metadata(key, value) VALUES (?, ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
-                (self.key(context, value["handle"]), encode(value)))
+            self._write(connection, context, value)
+
+    def auto_approve_pending(self, context, samples, at, *, threshold):
+        """Approve the current pending pool once it reaches ``threshold``.
+
+        Rejected decisions are deliberately untouched: observing a changed
+        sample would otherwise turn it back into pending. Only metadata is
+        written here; the samples themselves remain in the governed source.
+        """
+        if type(threshold) is not int or threshold < 1:
+            return 0
+        pending = {}
+        for sample in samples:
+            previous = self.read(context, sample.handle)
+            if previous is not None and previous["state"] == "rejected":
+                continue
+            value = self.observe(context, sample, at)
+            content_hash = sample.content_hash or digest(sample.text)
+            if value["content_hash"] == content_hash and value["state"] == "pending":
+                pending[sample.handle] = value
+        if len(pending) < threshold:
+            return 0
+        approved = 0
+        with self.runtime.transaction() as connection:
+            for handle, value in sorted(pending.items()):
+                current = self.read(context, handle)
+                if (current is None or current["content_hash"] != value["content_hash"]
+                        or current["state"] != "pending"):
+                    continue
+                decision_key = digest(["expression.sample_auto_review.v1", context.key, handle,
+                                       value["content_hash"], threshold])
+                self._write(connection, context, {
+                    **current, "state": "approved", "revision": current["revision"] + 1,
+                    "decided_at": stamp(at), "decided_by": "system:auto_review",
+                    "decision_key": decision_key})
+                approved += 1
+        return approved
 
     def eligible(self, context, sample, *, review_enabled):
         value = self.read(context, sample.handle)

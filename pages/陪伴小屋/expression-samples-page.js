@@ -112,7 +112,8 @@ window.CompanionExpressionSamplesPage = (() => {
       new_messages:runtimes.some(value=>value.new_messages!=null)?runtimes.reduce((sum,value)=>sum+Number(value.new_messages||0),0):null,
       required_new_messages:runtimes.reduce((sum,value)=>sum+Number(value.required_new_messages||0),0),
       group_batches_today:runtimes.reduce((maximum,value)=>Math.max(maximum,Number(value.group_batches_today||0)),0),
-      group_daily_batch_limit:runtimes.reduce((maximum,value)=>Math.max(maximum,Number(value.group_daily_batch_limit||0)),0)};
+      group_daily_batch_limit:runtimes.reduce((maximum,value)=>Math.max(maximum,Number(value.group_daily_batch_limit||0)),0),
+      sample_review_auto_after:runtimes.reduce((maximum,value)=>Math.max(maximum,Number(value.sample_review_auto_after||0)),0)};
     loaded=rows.some(row=>row.loaded);
     /* A source that answered with ``unavailable_reason`` is a readable page
        with no session behind it, which the header must not report as a
@@ -196,10 +197,11 @@ window.CompanionExpressionSamplesPage = (() => {
        see which source failed and with which code. */
     const issueList = readIssues.length ? `<details class="lh-signal-evidence" aria-label="读取明细"><summary>查看读取明细 · ${readIssues.length} 个来源</summary><ol>${readIssues.map(issue => `<li data-code="${e(issue.code)}"><b>${e(issue.label)}</b>：${e(issue.detail)}</li>`).join("")}</ol></details>` : "";
     root.innerHTML = `<div class="lh-samples">
-      <header class="lh-samples-head"><div><h3>观察素材</h3><span>${loaded ? reviewEnabled ? "先审核素材" : "自动取样" : "读取中"} · ${application}</span></div>
+      <header class="lh-samples-head"><div><h3>观察素材</h3><span>${loaded ? (reviewEnabled ? (Number(runtime.sample_review_auto_after || 0) > 0 ? "待审满 " + Number(runtime.sample_review_auto_after) + " 条自动审核" : "先审核素材") : "自动取样") : "读取中"} · ${application}</span></div>
         <div class="lh-samples-tools"><span class="refresh-cluster">${refreshedAt ? `<span class="refresh-stamp" role="status">刚刚已刷新 ${e(refreshedAt)}</span>` : ""}<button type="button" class="lh-command${refreshing ? " is-refreshing" : ""}" data-sample-refresh aria-busy="${refreshing ? "true" : "false"}"${disabled}>${refreshing ? "读取中…" : "重新读取"}</button></span>
           <button type="button" class="lh-command is-primary" data-sample-learn${canLearn() ? "" : " disabled"}>${runtime.running ? "学习中…" : "立即学习"}</button></div></header>
       <div class="lh-samples-progress" role="status"><span>${e(statusText())}</span><span>可用 ${Number(runtime.eligible_samples || 0)} / ${Number(runtime.minimum_samples || 0)}</span>
+        ${reviewEnabled && Number(runtime.sample_review_auto_after || 0) > 0 ? `<span>当前来源待审 ${Number(counts.pending || 0)} / ${Number(runtime.sample_review_auto_after)} 条</span>` : ""}
         ${runtime.new_messages == null ? "" : `<span>新增 ${Number(runtime.new_messages)} / ${Number(runtime.required_new_messages)}</span><span>今日 ${Number(runtime.group_batches_today)} / ${Number(runtime.group_daily_batch_limit)} 批</span>`}</div>
       <nav class="lh-samples-filters" aria-label="素材审核状态">${FILTERS.map(([key, label]) => `<button type="button" data-sample-filter="${key}" aria-pressed="${filter === key}"${disabled}>${label}<span>${key === "all" ? Object.values(counts).reduce((a,b) => a + Number(b), 0) : Number(counts[key] || 0)}</span></button>`).join("")}</nav>
       ${notice ? `<div class="lh-inline-status${error ? " is-error" : ""}" role="status"><span>${e(notice)}</span>${issueList}</div>` : ""}

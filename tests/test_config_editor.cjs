@@ -85,9 +85,11 @@ const NEW_KINDS = {
   'expression.learning': {
     group: 'expression.learning', scope: 'role', layers: ['installation', 'role'],
     editableLayers: ['installation', 'role', 'window'],
-    settings: {scan_interval_minutes: 1440, group_scan_interval_minutes: 180, group_daily_batch_limit: 6},
+    settings: {scan_interval_minutes: 1440, group_scan_interval_minutes: 180, group_daily_batch_limit: 6,
+      sample_review_auto_after: 0},
     fields: {scan_interval_minutes: ['integer', 5, 10080],
-      group_scan_interval_minutes: ['integer', 5, 10080], group_daily_batch_limit: ['integer', 1, 50]},
+      group_scan_interval_minutes: ['integer', 5, 10080], group_daily_batch_limit: ['integer', 1, 50],
+      sample_review_auto_after: ['integer', 0, 64]},
   },
   reaction: {
     group: 'expression.reaction', scope: 'installation', layers: ['installation'],
@@ -1810,6 +1812,8 @@ test('expression learning exposes separate private and group cadence with a shar
   assert.match(painted, /私聊学习扫描间隔/);
   assert.match(painted, /群聊学习扫描间隔/);
   assert.match(painted, /角色群聊每日学习批次/);
+  assert.match(painted, /待审素材自动审核阈值/);
+  assert.match(painted, /已排除素材不会恢复/);
   assert.match(painted, /当前角色默认/);
   const rendered = plain(harnessed.editors.state.instances[0].state.container.groups
     .flatMap(group => group.fields)).sort();

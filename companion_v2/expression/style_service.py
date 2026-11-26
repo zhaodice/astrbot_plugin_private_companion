@@ -1221,6 +1221,14 @@ class ExpressionStyleService:
                 self._set_result(self._work_key(context), {"state": "waiting_for_new_messages", "new_messages": count,
                                             "required": policy.group_new_messages})
                 return None
+        auto_review_after = getattr(policy, "sample_review_auto_after", 0)
+        if policy.sample_review_enabled and auto_review_after > 0:
+            pool = self.samples.inspect_inputs(
+                context, at, window_hours=min(policy.window_hours, MAX_WINDOW_HOURS),
+                sample_chars=policy.sample_chars,
+                member_ids=policy.selected_members if context.scope.kind is ScopeKind.GROUP else None)
+            self.samples.reviews.auto_approve_pending(
+                context, pool.samples, at, threshold=auto_review_after)
         samples = self.samples.collect(context, at, window_hours=min(policy.window_hours, MAX_WINDOW_HOURS),
                                        sample_limit=policy.sample_limit, sample_chars=policy.sample_chars,
                                        source_kind=INPUT_SAMPLE_SOURCE,
@@ -2323,6 +2331,7 @@ class ExpressionStyleService:
                 getattr(policy, "group_min_samples", None),
                 getattr(policy, "sample_chars", None),
                 getattr(policy, "sample_review_enabled", False),
+                getattr(policy, "sample_review_auto_after", 0),
                 getattr(policy, "group_new_messages", None),
                 getattr(policy, "group_member_mode", None),
                 getattr(policy, "group_member_ids", None),
@@ -2640,6 +2649,7 @@ class ExpressionStyleService:
             "worker": running,
             "learning_enabled": policy.group_learning_enabled if group else policy.private_learning_enabled,
             "sample_review_enabled": policy.sample_review_enabled,
+            "sample_review_auto_after": getattr(policy, "sample_review_auto_after", 0),
             # The material page renders its learning line from this same status.
             # After a restart it has to read the recorded outcome too, or it would
             # say "not learned yet" while the overview still reports the failure.

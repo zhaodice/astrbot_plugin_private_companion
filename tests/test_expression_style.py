@@ -20,6 +20,7 @@ from companion_v2.expression import learning, style_rotation
 from companion_v2.expression.configuration import (GROUP, ExpressionLearningSettings,
     POLICY_LAYERS, ROLE_DEFAULTS, ExpressionConfigurationOwner, configuration_fields, read_settings,
     target_for)
+from companion_v2.expression.sample_review import ExpressionSampleReviewStore
 from companion_v2.expression.style_service import ExpressionStyleService
 from companion_v2.expression.style_evidence import (DEFAULT_SAMPLE_CHARS, INPUT_SAMPLE_SOURCE, MAX_SAMPLE_CHARS,
     MAX_WINDOW_HOURS, ExpressionSampleCatalog, SampleSet, StyleSample, evidence_snapshot,
@@ -331,6 +332,51 @@ class SampleCatalogTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "expression_scope_required")
 
 
+class SampleReviewAutoTests(unittest.TestCase):
+    class Store(ExpressionSampleReviewStore):
+        def __init__(self):
+            self.runtime = self
+            self.values = {}
+
+        def read(self, context, handle):
+            return self.values.get(handle)
+
+        @contextmanager
+        def transaction(self):
+            yield self
+
+        def _write(self, connection, context, value):
+            self.values[value["handle"]] = value
+
+        def write(self, context, value):
+            self._write(None, context, value)
+
+    def test_threshold_approves_the_pending_pool_and_keeps_rejected_samples_excluded(self):
+        context = SampleCatalogTests.private_context()
+        samples = tuple(StyleSample("input:" + name, text)
+                        for name, text in (("a", "甲"), ("b", "乙"), ("c", "丙"), ("d", "丁")))
+        store = self.Store()
+        rejected = store.observe(context, samples[0], NOW)
+        store.write(context, {**rejected, "state": "rejected", "revision": 2, "decided_at": stamp(NOW),
+                              "decided_by": "operator", "decision_key": "manual-reject"})
+
+        self.assertEqual(store.auto_approve_pending(context, samples, NOW, threshold=3), 3)
+        self.assertEqual(store.values["input:a"]["state"], "rejected")
+        self.assertTrue(all(store.values["input:" + name]["state"] == "approved" for name in "bcd"))
+        self.assertTrue(all(store.values["input:" + name]["decided_by"] == "system:auto_review"
+                            for name in "bcd"))
+        self.assertFalse(any(text in encode(item) for item in store.values.values()
+                             for text in ("甲", "乙", "丙", "丁")))
+        self.assertEqual(store.auto_approve_pending(context, samples, NOW, threshold=3), 0)
+
+    def test_below_threshold_records_pending_without_approving(self):
+        context = SampleCatalogTests.private_context()
+        samples = (StyleSample("input:a", "甲"), StyleSample("input:b", "乙"))
+        store = self.Store()
+        self.assertEqual(store.auto_approve_pending(context, samples, NOW, threshold=3), 0)
+        self.assertTrue(all(value["state"] == "pending" for value in store.values.values()))
+
+
 class ExpressionRotationTests(unittest.TestCase):
     """The use-then-de-prioritise rotation adapted from V1's dream-fragment pool."""
 
@@ -486,12 +532,14 @@ class ExpressionSettingsTests(unittest.TestCase):
         self.assertEqual(read_settings(self.runtime, self.context()).group_min_samples, 20)
         self.assertEqual(read_settings(self.runtime, self.context()).active_signal_limit, 60)
         self.assertEqual(read_settings(self.runtime, self.context()).minimum_confidence, 0.65)
+        self.assertEqual(read_settings(self.runtime, self.context()).sample_review_auto_after, 0)
 
     def test_written_values_round_trip(self):
         self.write({"private_learning_enabled": False, "group_learning_enabled": True,
                     "window_hours": 48, "sample_limit": 40, "group_min_samples": 32,
                     "active_signal_limit": 72, "minimum_confidence": 0.8,
-                    "min_samples": 2, "rules_per_turn": 4, "rotation_decay_hours": 12})
+                    "min_samples": 2, "rules_per_turn": 4, "rotation_decay_hours": 12,
+                    "sample_review_auto_after": 12})
         settings = read_settings(self.runtime, self.context())
         self.assertFalse(settings.private_learning_enabled)
         self.assertTrue(settings.group_learning_enabled)
@@ -501,6 +549,7 @@ class ExpressionSettingsTests(unittest.TestCase):
                          (48, 40, 2))
         self.assertEqual((settings.rules_per_turn, settings.rotation_decay_hours), (4, 12))
         self.assertEqual(settings.minimum_confidence, 0.8)
+        self.assertEqual(settings.sample_review_auto_after, 12)
 
     def test_installation_policy_is_shared_across_scopes(self):
         self.write({"window_hours": 48})
@@ -530,7 +579,9 @@ class ExpressionSettingsTests(unittest.TestCase):
                        {"rotation_candidate_limit": 4, "rules_per_turn": 8},
                        {"private_learning_enabled": "yes"},
                        {"group_learning_enabled": "yes"},
-                       {"window_hours": MAX_WINDOW_HOURS + 1}):
+                       {"window_hours": MAX_WINDOW_HOURS + 1},
+                       {"sample_review_auto_after": -1},
+                       {"sample_review_auto_after": 65}):
             with self.assertRaises(Exception):
                 ExpressionLearningSettings.from_values(values)
 
