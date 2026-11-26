@@ -68,6 +68,20 @@ def _developer_payload(payload):
     return _developer_content(payload)
 
 
+def _disable_deepseek_thinking(payload, envelope, provider_id, model):
+    """Keep expression learning's small structured answer out of hidden reasoning.
+
+    DeepSeek accepts ``thinking`` as a top-level Chat Completions field. Only the
+    expression-learning call is changed: ordinary conversation keeps the host's
+    configured thinking mode. The provider is identified from both its configured
+    id and model so direct and catalogue-backed host adapters behave the same.
+    """
+    request = envelope.original
+    identity = f"{provider_id or ''} {model or ''}".casefold()
+    if request.output_format == "role_expression_learning" and "deepseek" in identity:
+        payload["thinking"] = {"type": "disabled"}
+
+
 def _gemini_audio_part(item):
     """把 OpenAI 形状的音频条目换成 AstrBot 的 Gemini 转换认得的那一种。
 
@@ -928,9 +942,12 @@ class AstrBotTextProvider:
                     if envelope.original.images or envelope.original.audios or envelope.original.videos:
                         def image_materials(messages):
                             return [message for message in messages if isinstance(message.get("content"), list)]
-                        if image_materials(payload["messages"]) != image_materials(wire.messages):
-                            raise ValueError("native preparation changed original images or their coverage and attribution")
+                    if image_materials(payload["messages"]) != image_materials(wire.messages):
+                        raise ValueError("native preparation changed original images or their coverage and attribution")
                     payload[self.output_key] = envelope.max_output_tokens
+                    _disable_deepseek_thinking(
+                        payload, envelope, self.provider_id,
+                        envelope.model_override or self.model)
             else:
                 # 原生 Gemini 接受 OpenAI 形状的 messages，由宿主转换为 generate_content；
                 # 输出上限使用 Gemini 认得的 max_tokens。
